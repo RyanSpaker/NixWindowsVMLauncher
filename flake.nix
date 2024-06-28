@@ -66,6 +66,7 @@
             mv $out/bin/nixos-windows-launcher $out/bin/.nixos-windows-launcher
             makeWrapper $out/bin/.nixos-windows-launcher $out/bin/nixos-windows-launcher --set LD_LIBRARY_PATH ${libraries}
             mkdir -p $out/share/dbus-1/system.d
+            mkdir -p $out/share/dbus-1/session.d
             cp ${src}/dbus.conf $out/share/dbus-1/system.d/org.cowsociety.vmlauncher.conf
             cp ${src}/dbus_session.conf $out/share/dbus-1/session.d/org.cowsociety.vmlauncher.conf
           '';
