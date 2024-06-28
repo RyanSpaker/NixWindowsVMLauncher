@@ -84,9 +84,9 @@ impl SystemState{
 async fn main() -> Result<(), AppError>{
     let arguments = args().skip(1).collect::<Vec<String>>();
     let config = match arguments.get(0).map(|arg| arg.as_str()) {
-        None => LaunchConfig::Spice,
         Some("--client-daemon") => LaunchConfig::Servant,
         Some("-l") => LaunchConfig::LG,
+        Some("-s") => LaunchConfig::Spice,
         _ => LaunchConfig::Help
     };
     return match config {
@@ -99,7 +99,7 @@ async fn main() -> Result<(), AppError>{
     };
 }
 fn print_help() {
-    println!("-l for full gpu passthrough, none for spice, --client-daemon for servant program (not for normal use). Must specify mouse input path")
+    println!("-l for full gpu passthrough, -s for spice, --client-daemon for servant program (not for normal use). Must specify mouse input path")
 }
 async fn root_app(vm_type: LaunchConfig, mouse_path: String) -> Result<(), AppError> {
     if !Uid::effective().is_root() {
