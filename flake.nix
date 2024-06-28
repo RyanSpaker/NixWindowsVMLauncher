@@ -27,6 +27,8 @@
             pkg-config
             cargo-udeps
             git
+            dbus
+            libinput
             rustc.llvmPackages.clang
             rustc.llvmPackages.bintools
             (wrapBintoolsWith { bintools = mold; })
@@ -41,21 +43,31 @@
           cargo = rust-toolchain.toolchain;
           rustc = rust-toolchain.toolchain;
         }).buildRustPackage rec {
-          pname = "cowsociety-nixos-windows-launcher";
+          pname = "nixos-windows-launcher";
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = with pkgs; [
             pkg-config
+            makeWrapper
           ];
           buildInputs = with pkgs; [
             pkg-config
             cargo-udeps
             git
+            dbus
+            libinput
             rustc.llvmPackages.clang
             rustc.llvmPackages.bintools
             (wrapBintoolsWith { bintools = mold; })
           ];
+          libraries = pkgs.lib.makeLibraryPath [pkgs.libinput pkgs.dbus];
+          postInstall = ''
+            mv $out/bin/nixos-windows-launcher $out/bin/.nixos-windows-launcher
+            makeWrapper $out/bin/.nixos-windows-launcher $out/bin/nixos-windows-launcher --set LD_LIBRARY_PATH ${libraries}
+            mkdir -p $out/share/dbus-1/system.d
+            cp ${src}/dbus.conf $out/share/dbus-1/system.d/org.cowsociety.vmlauncher.conf
+          '';
         };
       }
     );
