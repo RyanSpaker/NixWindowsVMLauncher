@@ -65,7 +65,7 @@ pub async fn unload_gpu(dbus_state: &mut DBusState, ss: &mut SystemState) -> Res
     stop_display_manager(dbus_state).await?;
     ss.dp_stopped = true;
     // Stop pipewire
-    stop_pipewire(dbus_state).await;
+    stop_pipewire().await;
     ss.pw_stopped = true;
     // Unload kernel Modules
     unload_nvidia_modules(ss)?;
@@ -75,7 +75,7 @@ pub async fn unload_gpu(dbus_state: &mut DBusState, ss: &mut SystemState) -> Res
     load_vfio_modules()?;
     ss.vfio_loaded = true;
     // Restart pipewire service
-    start_pipewire(dbus_state).await;
+    start_pipewire().await;
     ss.pw_stopped = false;
     // restart display manager
     start_display_manager(dbus_state).await?;
@@ -94,9 +94,7 @@ pub async fn reattach_gpu(dbus_state: &mut DBusState, ss: &mut SystemState) -> R
     // restart pipewire and display manager
     restart_display_manager(dbus_state).await?;
     ss.dp_reset = true;
-    // reconnect to all user busses
-    dbus_state.reconnect_users().await.map_err(|err| SetupError::BusError(err))?;
-    restart_pipewire(dbus_state).await;
+    restart_pipewire().await;
     ss.pw_reset = true;
     Ok(())
 }
@@ -171,30 +169,10 @@ pub async fn cleanup(mut dbus_state: DBusState, ss: SystemState) {
         }
         // restart pipewire
         if !ss.pw_reset{
-            // remake user connections
-            let _ = dbus_state.reconnect_users().await;
             if ss.pw_stopped {
-                let (_, _, errors) = dbus_state.call_user_method::<_, (String,)>(
-                    "org.freedesktop.systemd1", 
-                    "/org/freedesktop/systemd1", 
-                    "org.freedesktop.systemd1.Manager", 
-                    "StartUnit", 
-                    ("pipewire.service", "replace")
-                ).await;
-                for (name, err) in errors{
-                    println!("Starting pipewire service for user {} failed with error: {}", name, err);
-                }
+                start_pipewire().await;
             }else{
-                let (_, _, errors) = dbus_state.call_user_method::<_, (String,)>(
-                    "org.freedesktop.systemd1", 
-                    "/org/freedesktop/systemd1", 
-                    "org.freedesktop.systemd1.Manager", 
-                    "RestartUnit", 
-                    ("pipewire.service", "replace")
-                ).await;
-                for (name, err) in errors{
-                    println!("Stopping pipewire service for user {} failed with error: {}", name, err);
-                }
+                restart_pipewire().await;
             }
         }
     }
@@ -296,43 +274,40 @@ pub async fn restart_display_manager(dbus_state: &mut DBusState) -> Result<(), S
     ).await.map(|_|()).map_err(|err| SetupError::BusError(err))
 }
 
-pub async fn stop_pipewire(dbus_state: &mut DBusState) {
-    let (_, _, errors) = dbus_state.call_user_method::<_, (String,)>(
-        "org.freedesktop.systemd1", 
-        "/org/freedesktop/systemd1", 
-        "org.freedesktop.systemd1.Manager", 
-        "StopUnit", 
-        ("pipewire.service", "replace")
-    ).await;
-    for (name, err) in errors{
-        println!("Stopping pipewire service for user {} failed with error: {}", name, err);
-    }
+pub async fn stop_pipewire() {
+    Path::new("/run/user").read_dir().unwrap().flatten().for_each(|user| {
+        let name = user.file_name().into_string().unwrap();
+        let output = super::call_command("systemctl", ["--user", ("--machine=".to_string() + name.as_str() + "@.host").as_str(), "stop", "pipewire.socket"]);
+        if let Ok(out) = output{
+            if out.status.success() {
+                println!("Successfully stopped user {}'s pipewire socket!", name);
+            }
+        }
+    });
 }
 
-pub async fn start_pipewire(dbus_state: &mut DBusState) {
-    let (_, _, errors) = dbus_state.call_user_method::<_, (String,)>(
-        "org.freedesktop.systemd1", 
-        "/org/freedesktop/systemd1", 
-        "org.freedesktop.systemd1.Manager", 
-        "StartUnit", 
-        ("pipewire.service", "replace")
-    ).await;
-    for (name, err) in errors{
-        println!("Starting pipewire service for user {} failed with error: {}", name, err);
-    }
+pub async fn start_pipewire() {
+    Path::new("/run/user").read_dir().unwrap().flatten().for_each(|user| {
+        let name = user.file_name().into_string().unwrap();
+        let output = super::call_command("systemctl", ["--user", ("--machine=".to_string() + name.as_str() + "@.host").as_str(), "stop", "pipewire.socket"]);
+        if let Ok(out) = output{
+            if out.status.success() {
+                println!("Successfully started user {}'s pipewire socket!", name);
+            }
+        }
+    });
 }
 
-pub async fn restart_pipewire(dbus_state: &mut DBusState) {
-    let (_, _, errors) = dbus_state.call_user_method::<_, (String,)>(
-        "org.freedesktop.systemd1", 
-        "/org/freedesktop/systemd1", 
-        "org.freedesktop.systemd1.Manager", 
-        "RestartUnit", 
-        ("pipewire.service", "replace")
-    ).await;
-    for (name, err) in errors{
-        println!("Stopping pipewire service for user {} failed with error: {}", name, err);
-    }
+pub async fn restart_pipewire() {
+    Path::new("/run/user").read_dir().unwrap().flatten().for_each(|user| {
+        let name = user.file_name().into_string().unwrap();
+        let output = super::call_command("systemctl", ["--user", ("--machine=".to_string() + name.as_str() + "@.host").as_str(), "stop", "pipewire.socket"]);
+        if let Ok(out) = output{
+            if out.status.success() {
+                println!("Successfully restarted user {}'s pipewire socket!", name);
+            }
+        }
+    });
 }
 
 pub fn unload_nvidia_modules(ss: &mut SystemState) -> Result<(), SetupError> {

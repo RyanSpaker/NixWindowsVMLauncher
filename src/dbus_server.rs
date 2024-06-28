@@ -1,6 +1,6 @@
 // This module is responsible for creating and managing dbus server connections
-use std::{collections::HashMap, ffi::OsString, future::Future, sync::{atomic::{AtomicBool, AtomicU32, Ordering}, Arc, Mutex}, task::{Poll, Waker}};
-use dbus::{arg::{AppendAll, ReadAll}, channel::{Channel, MatchingReceiver, Sender}, message::MatchRule, nonblock::SyncConnection, strings::{Interface, Member}, Message, Path};
+use std::{ffi::OsString, future::Future, sync::{atomic::{AtomicBool, AtomicU32, Ordering}, Arc, Mutex}, task::{Poll, Waker}};
+use dbus::{arg::{AppendAll, ReadAll}, channel::{MatchingReceiver, Sender}, message::MatchRule, nonblock::SyncConnection, strings::{Interface, Member}, Message, Path};
 use dbus_crossroads::{Crossroads, IfaceBuilder};
 use dbus_tokio::connection::IOResourceError;
 use futures::task::AtomicWaker;
@@ -44,35 +44,9 @@ impl ToString for DBusError{
 pub struct DBusState{
     pub system_conn: Arc<SyncConnection>,
     pub system_handle: Box<JoinHandle<IOResourceError>>,
-    pub communicator: Option<Communicator>,
-    pub user_conn: HashMap<String, (Arc<SyncConnection>, JoinHandle<IOResourceError>)>
+    pub communicator: Option<Communicator>
 }
 impl DBusState{
-    /// Call a method on the session bus for all known users
-    pub async fn call_user_method<A: AppendAll + Clone, R: ReadAll + 'static>(&mut self, dest: &str, path: &str, interface: &str, method: &str, args: A) -> (Vec<(String, R)>, Vec<(String, IOResourceError)>, Vec<(String, dbus::Error)>){
-        let mut stale_names = vec![];
-        let mut succeses = vec![];
-        let mut errors = vec![];
-        for (name, (conn, handle)) in self.user_conn.iter_mut(){
-            if handle.is_finished() {
-                stale_names.push((name.to_owned(), handle.await.unwrap())); continue;}
-            let proxy = dbus::nonblock::Proxy::new(
-                dest, 
-                path, 
-                std::time::Duration::from_secs(2), 
-                conn.clone()
-            );
-            match proxy.method_call(interface, method, args.clone()).await {
-                Ok(response) => {succeses.push((name.to_owned(), response));}
-                Err(err) => {errors.push((name.to_owned(), err));}
-            };
-        }
-        for (name, err) in stale_names.iter(){
-            self.user_conn.remove(name);
-            println!("bus connection to user {} was dropped with error: {}", name, err);
-        }
-        (succeses, stale_names, errors)
-    }
     /// Call a method on the system bus
     pub async fn call_system_method<A: AppendAll, R: ReadAll + 'static>(&mut self, dest: &str, path: &str, interface: &str, method: &str, args: A) -> Result<R, DBusError>{
         self.check_system_bus().await?;
@@ -152,35 +126,6 @@ impl DBusState{
         )).map_err(|_| DBusError::FailedToSendShutdownSignal)?;
         Ok(())
     }
-    /// Reconnect to all available session busses
-    pub async fn reconnect_users(&mut self) -> Result<(), DBusError>{
-        for dir in std::path::Path::new("/run/user/").read_dir()
-            .map_err(|err| DBusError::FailedToReadRunUserDir(err))?.into_iter().flatten() 
-        {
-            let name = dir.file_name().into_string().map_err(|err| DBusError::FailedToTurnFilenameIntoString(err))?;
-            if let Some((conn, handle)) = self.user_conn.remove(&name) {
-                if !handle.is_finished() {self.user_conn.insert(name, (conn, handle)); continue;}
-                let err = handle.await.unwrap();
-                println!("bus connection to user {:?} was dropped with error: {}", name, err);
-            }
-            if !dir.file_type().is_ok_and(|t| t.is_dir()) || 
-                !dir.path().read_dir().is_ok_and(|children| children.flatten().any(|child| child.file_name() == "bus")) 
-            {continue;}
-            let mut channel = Channel::open_private(&(
-                "unix:path=/run/user/".to_string() + 
-                name.as_str() + 
-                "/bus"
-            )).map_err(|err| DBusError::FailedToOpenUserChannel(err))?;
-            channel.register().map_err(|err| DBusError::FailedToRegisterUserChannel(err))?;
-            let (resource, conn) = dbus_tokio::connection::from_channel::<SyncConnection>(channel)
-                .map_err(|err| DBusError::FailedToOpenDBusSession(err))?;
-            let handle = tokio::spawn(async {
-                resource.await
-            });
-            self.user_conn.insert(name, (conn, handle));
-        }
-        Ok(())
-    }
 }
 /// Function to connect to all needed dbus connections.
 pub fn connect_dbus() -> Result<DBusState, DBusError>{
@@ -190,29 +135,7 @@ pub fn connect_dbus() -> Result<DBusState, DBusError>{
     let system_handle: Box<JoinHandle<IOResourceError>> = Box::new(tokio::spawn(async {
         resource.await
     }));
-    // connect to all user busses
-    let mut user_conn = HashMap::new();
-    for dir in std::path::Path::new("/run/user/").read_dir()
-        .map_err(|err| DBusError::FailedToReadRunUserDir(err))?.into_iter().flatten() 
-    {
-        let name = dir.file_name().into_string().map_err(|err| DBusError::FailedToTurnFilenameIntoString(err))?;
-        if !dir.file_type().is_ok_and(|t| t.is_dir()) || 
-            !dir.path().read_dir().is_ok_and(|children| children.flatten().any(|child| child.file_name() == "bus")) 
-        {continue;}
-        let mut channel = Channel::open_private(&(
-            "unix:path=/run/user/".to_string() + 
-            name.as_str() + 
-            "/bus"
-        )).map_err(|err| DBusError::FailedToOpenUserChannel(err))?;
-        channel.register().map_err(|err| DBusError::FailedToRegisterUserChannel(err))?;
-        let (resource, conn) = dbus_tokio::connection::from_channel::<SyncConnection>(channel)
-            .map_err(|err| DBusError::FailedToOpenDBusSession(err))?;
-        let handle = tokio::spawn(async {
-            resource.await
-        });
-        user_conn.insert(name, (conn, handle));
-    }
-    Ok(DBusState { system_conn, system_handle, user_conn, communicator: None})
+    Ok(DBusState { system_conn, system_handle, communicator: None})
 }
 /// Struct used to communicate between the dbus server and the main program
 #[derive(Debug, Default, Clone)]
