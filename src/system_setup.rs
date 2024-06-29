@@ -1,11 +1,10 @@
 use std::{env::{self, VarError}, fs::File, io::{Read, Write}, path::Path};
-use likemod::ModUnloader;
 use crate::{dbus_server::{DBusError, DBusState}, LaunchConfig, SystemState};
 
 #[derive(Debug)]
 pub enum SetupError{
     BusError(DBusError),
-    FailedToUnloadKernelModule(String, likemod::errors::Error),
+    FailedToUnloadKernelModule(String, std::io::Error),
     FailedToLoadKernelModule(String, std::io::Error),
     FailedToDetachGPU(String, std::io::Error),
     FailedToAttachGPU(String, std::io::Error),
@@ -15,7 +14,8 @@ pub enum SetupError{
     FailedToGetEnvVar(String, VarError),
     FailedToReadXmlFile(std::io::Error),
     FailedToCreateTmpXmlFile(std::io::Error),
-    FailedToWriteTmpXmlFile(std::io::Error)
+    FailedToWriteTmpXmlFile(std::io::Error),
+    ModProbeUnloadFailed(String, String)
 }
 impl ToString for SetupError{
     fn to_string(&self) -> String {
@@ -31,7 +31,8 @@ impl ToString for SetupError{
             SetupError::FailedToGetEnvVar(name, err) => format!("Failed to get env var {} with error: {}", *name, *err),
             SetupError::FailedToReadXmlFile(err) => format!("Failed to read vm xml file: {}", *err),
             SetupError::FailedToCreateTmpXmlFile(err) => format!("Failed to create the /tmp/windows.xml file: {}", *err),
-            SetupError::FailedToWriteTmpXmlFile(err) => format!("Failed to write to /tmp/windows.xml: {}", *err)
+            SetupError::FailedToWriteTmpXmlFile(err) => format!("Failed to write to /tmp/windows.xml: {}", *err),
+            SetupError::ModProbeUnloadFailed(name, err) => format!("Failed to unload module {} with stderr: {}", *name, *err)
         }
     }
 }
@@ -114,7 +115,7 @@ pub async fn cleanup(mut dbus_state: DBusState, ss: SystemState) {
     }
     // unload vfio if needed
     if ss.vfio_loaded {
-        let _ = ModUnloader::new().unload_sync("vfio-pci", false);
+        let _ = super::call_command("modprobe", ["-r", "vfio-pci"]);
     }
     // reconnect gpu
     if ss.gpu_disconnected.0 {let _ = super::call_command("virsh", ["nodedev-reattach", "pci_0000_01_00_0"]);}
@@ -311,17 +312,29 @@ pub async fn restart_pipewire() {
 }
 
 pub fn unload_nvidia_modules(ss: &mut SystemState) -> Result<(), SetupError> {
-    ModUnloader::new().unload_sync("nvidia_drm", false)
+    let out = super::call_command("modprobe", ["-r", "nvidia_drm"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia_drm".to_string(), err))?;
+    if !out.status.success() && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+        return Err(SetupError::ModProbeUnloadFailed("nvidia_drm".to_string(), String::from_utf8(out.stderr).unwrap()))
+    }
     ss.nvidia_unloaded.0 = true;
-    ModUnloader::new().unload_sync("nvidia_uvm", false)
+    let out = super::call_command("modprobe", ["-r", "nvidia_uvm"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia_uvm".to_string(), err))?;
+    if !out.status.success() && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+        return Err(SetupError::ModProbeUnloadFailed("nvidia_uvm".to_string(), String::from_utf8(out.stderr).unwrap()))
+    }
     ss.nvidia_unloaded.1 = true;
-    ModUnloader::new().unload_sync("nvidia_modeset", false)
+    let out = super::call_command("modprobe", ["-r", "nvidia_modeset"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia_modeset".to_string(), err))?;
+    if !out.status.success() && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+        return Err(SetupError::ModProbeUnloadFailed("nvidia_modeset".to_string(), String::from_utf8(out.stderr).unwrap()))
+    }
     ss.nvidia_unloaded.2 = true;
-    ModUnloader::new().unload_sync("nvidia", false)
+    let out = super::call_command("modprobe", ["-r", "nvidia"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia".to_string(), err))?;
+    if !out.status.success() && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+        return Err(SetupError::ModProbeUnloadFailed("nvidia".to_string(), String::from_utf8(out.stderr).unwrap()))
+    }
     ss.nvidia_unloaded.3 = true;
     Ok(())
 }
@@ -370,7 +383,11 @@ pub fn load_vfio_modules() -> Result<(), SetupError>{
 }
 
 pub fn unload_vfio_modules() -> Result<(), SetupError>{
-    ModUnloader::new().unload_sync("vfio-pci", false)
-        .map_err(|err| SetupError::FailedToUnloadKernelModule("vfio-pci".to_string(), err))
+    let out = super::call_command("modprobe", ["-r", "vfio-pci"])
+        .map_err(|err| SetupError::FailedToUnloadKernelModule("vfio-pci".to_string(), err))?;
+    if !out.status.success() && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+        return Err(SetupError::ModProbeUnloadFailed("vfio-pci".to_string(), String::from_utf8(out.stderr).unwrap()))
+    }
+    Ok(())
 }
 
