@@ -57,7 +57,7 @@ impl std::error::Error for AppError{}
 // Calls the command with the args
 pub fn call_command<I, S>(command: &str, args: I) -> std::io::Result<Output>
 where I: IntoIterator<Item = S>, S: AsRef<OsStr> {
-    std::process::Command::new(command).args(args).stderr(Stdio::null()).stdout(Stdio::piped()).output()
+    std::process::Command::new(command).args(args).stderr(Stdio::piped()).stdout(Stdio::piped()).output()
 }
 
 #[derive(Debug, Default)]

@@ -330,14 +330,14 @@ pub fn unload_nvidia_modules(ss: &mut SystemState) -> Result<(), SetupError> {
     if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
         return Err(SetupError::ModProbeUnloadFailed("nvidia_uvm".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
     }
-    println!("Unloading nvidia_drm with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
+    println!("Unloading nvidia_uvm with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
     ss.nvidia_unloaded.0 = true;
     let out = super::call_command("modprobe", ["-r", "nvidia_drm"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia_drm".to_string(), err))?;
     if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
         return Err(SetupError::ModProbeUnloadFailed("nvidia_drm".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
     }
-    println!("Unloading nvidia_uvm with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
+    println!("Unloading nvidia_drm with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
     ss.nvidia_unloaded.1 = true;
     let out = super::call_command("modprobe", ["-r", "nvidia_modeset"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia_modeset".to_string(), err))?;
@@ -374,11 +374,11 @@ pub fn load_nvidia_modules(ss: &mut SystemState) -> Result<(), SetupError> {
 
 pub fn disconnect_gpu(ss: &mut SystemState) -> Result<(), SetupError> {
     // Disconnect nvidia gpu
-    super::call_command("virsh", ["nodedev-detach", "pci_0000_01_00_0"])
-        .map_err(|err| SetupError::FailedToDetachGPU("pci_0000_01_00_0".to_string(), err))?;
+    println!("detach 1: {:?}", super::call_command("virsh", ["nodedev-detach", "pci_0000_01_00_0"])
+        .map_err(|err| SetupError::FailedToDetachGPU("pci_0000_01_00_0".to_string(), err))?);
     ss.gpu_disconnected.0 = true;
-    super::call_command("virsh", ["nodedev-detach", "pci_0000_01_00_1"])
-        .map_err(|err| SetupError::FailedToDetachGPU("pci_0000_01_00_1".to_string(), err))?;
+    println!("detach 2: {:?}", super::call_command("virsh", ["nodedev-detach", "pci_0000_01_00_1"])
+        .map_err(|err| SetupError::FailedToDetachGPU("pci_0000_01_00_1".to_string(), err))?);
     ss.gpu_disconnected.1 = true;
     Ok(())
 }
