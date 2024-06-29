@@ -1,4 +1,6 @@
 use std::{env::{self, VarError}, fs::File, io::{Read, Write}, path::Path, time::Duration};
+use dbus::arg::Variant;
+
 use crate::{dbus_server::{DBusError, DBusState}, LaunchConfig, SystemState};
 
 #[derive(Debug)]
@@ -72,7 +74,7 @@ pub async fn unload_gpu(dbus_state: &mut DBusState, ss: &mut SystemState) -> Res
     ss.pw_stopped = true;
     // Unload kernel Modules
     println!("Unloading nvidia Modules");
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     unload_nvidia_modules(ss)?;
     // Disconnect GPU
     println!("Disconnecting GPU");
@@ -146,19 +148,19 @@ pub async fn cleanup(mut dbus_state: DBusState, ss: SystemState) {
                 "org.freedesktop.systemd1", 
                 "/org/freedesktop/systemd1/unit/user_2eslice", 
                 "org.freedesktop.systemd1.Unit", 
-                "SetProperties", (true, vec![("AllowedCPUs", vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
+                "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
             ).await;
             let _ =dbus_state.call_system_method::<_, ()>(
                 "org.freedesktop.systemd1", 
                 "/org/freedesktop/systemd1/unit/system_2eslice", 
                 "org.freedesktop.systemd1.Unit", 
-                "SetProperties", (true, vec![("AllowedCPUs", vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
+                "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
             ).await;
             let _ = dbus_state.call_system_method::<_, ()>(
                 "org.freedesktop.systemd1", 
                 "/org/freedesktop/systemd1/unit/unit_2escope", 
                 "org.freedesktop.systemd1.Unit", 
-                "SetProperties", (true, vec![("AllowedCPUs", vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
+                "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
             ).await;
         }
         // restart display manager
@@ -197,21 +199,21 @@ pub async fn performance_enhancements(dbus_state: &mut DBusState, ss: &mut Syste
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1/unit/user_2eslice", 
         "org.freedesktop.systemd1.Unit", 
-        "SetProperties", (true, vec![("AllowedCPUs", vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
+        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
     ).await.map_err(|err| SetupError::BusError(err))?;
     ss.cpus_limited.0 = true;
     dbus_state.call_system_method::<_, ()>(
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1/unit/system_2eslice", 
         "org.freedesktop.systemd1.Unit", 
-        "SetProperties", (true, vec![("AllowedCPUs", vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
+        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
     ).await.map_err(|err| SetupError::BusError(err))?;
     ss.cpus_limited.1 = true;
     dbus_state.call_system_method::<_, ()>(
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1/unit/unit_2escope", 
         "org.freedesktop.systemd1.Unit", 
-        "SetProperties", (true, vec![("AllowedCPUs", vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
+        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
     ).await.map_err(|err| SetupError::BusError(err))?;
     ss.cpus_limited.2 = true;
     Path::new("/sys/devices/system/cpu/").read_dir().map_err(|err| SetupError::FailedToReadCPUDir(err))?
@@ -230,21 +232,21 @@ pub async fn undo_performance_enhancements(dbus_state: &mut DBusState, ss: &mut 
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1/unit/user_2eslice", 
         "org.freedesktop.systemd1.Unit", 
-        "SetProperties", (true, vec![("AllowedCPUs", vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
+        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
     ).await.map_err(|err| SetupError::BusError(err))?;
     ss.cpus_limited.0 = false;
     dbus_state.call_system_method::<_, ()>(
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1/unit/system_2eslice", 
         "org.freedesktop.systemd1.Unit", 
-        "SetProperties", (true, vec![("AllowedCPUs", vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
+        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
     ).await.map_err(|err| SetupError::BusError(err))?;
     ss.cpus_limited.1 = false;
     dbus_state.call_system_method::<_, ()>(
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1/unit/unit_2escope", 
         "org.freedesktop.systemd1.Unit", 
-        "SetProperties", (true, vec![("AllowedCPUs", vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
+        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
     ).await.map_err(|err| SetupError::BusError(err))?;
     ss.cpus_limited.2 = false;
     Path::new("/sys/devices/system/cpu/").read_dir().map_err(|err| SetupError::FailedToReadCPUDir(err))?
