@@ -72,7 +72,7 @@ pub async fn unload_gpu(dbus_state: &mut DBusState, ss: &mut SystemState) -> Res
     ss.pw_stopped = true;
     // Unload kernel Modules
     println!("Unloading nvidia Modules");
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
     unload_nvidia_modules(ss)?;
     // Disconnect GPU
     println!("Disconnecting GPU");
@@ -325,28 +325,28 @@ pub async fn restart_pipewire() {
 }
 
 pub fn unload_nvidia_modules(ss: &mut SystemState) -> Result<(), SetupError> {
-    let out = super::call_command("modprobe", ["-r", "nvidia_uvm"])
+    let out = super::call_command("modprobe", ["-f", "-r", "nvidia_uvm"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia_uvm".to_string(), err))?;
     if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
         return Err(SetupError::ModProbeUnloadFailed("nvidia_uvm".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
     }
     println!("Unloading nvidia_uvm with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
     ss.nvidia_unloaded.0 = true;
-    let out = super::call_command("modprobe", ["-r", "nvidia_drm"])
+    let out = super::call_command("modprobe", ["-f", "-r", "nvidia_drm"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia_drm".to_string(), err))?;
+    println!("Unloading nvidia_drm with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout.clone()).unwrap(), String::from_utf8(out.stderr.clone()).unwrap());
     if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
         return Err(SetupError::ModProbeUnloadFailed("nvidia_drm".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
     }
-    println!("Unloading nvidia_drm with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
     ss.nvidia_unloaded.1 = true;
-    let out = super::call_command("modprobe", ["-r", "nvidia_modeset"])
+    let out = super::call_command("modprobe", ["-f", "-r", "nvidia_modeset"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia_modeset".to_string(), err))?;
     if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
         return Err(SetupError::ModProbeUnloadFailed("nvidia_modeset".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
     }
     println!("Unloading nvidia_modeset with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
     ss.nvidia_unloaded.2 = true;
-    let out = super::call_command("modprobe", ["-r", "nvidia"])
+    let out = super::call_command("modprobe", ["-f", "-r", "nvidia"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia".to_string(), err))?;
     if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
         return Err(SetupError::ModProbeUnloadFailed("nvidia".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
@@ -400,7 +400,7 @@ pub fn load_vfio_modules() -> Result<(), SetupError>{
 }
 
 pub fn unload_vfio_modules() -> Result<(), SetupError>{
-    let out = super::call_command("modprobe", ["-r", "vfio-pci"])
+    let out = super::call_command("modprobe", ["-f", "-r", "vfio-pci"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("vfio-pci".to_string(), err))?;
     if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
         return Err(SetupError::ModProbeUnloadFailed("vfio-pci".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
