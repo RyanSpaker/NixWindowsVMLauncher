@@ -112,6 +112,7 @@ async fn root_app(vm_type: LaunchConfig, mouse_path: String) -> Result<(), AppEr
     println!("Starting Setup");
     // Run VM
     if let Err(err) = master::master(&mut dbus_state, &mut system_state).await {
+        println!("Starting Cleanup");
         system_setup::cleanup(dbus_state, system_state).await;
         return Err(err);
     }

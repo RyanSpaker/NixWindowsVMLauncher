@@ -63,22 +63,29 @@ pub fn write_xml(xml: String) -> Result<(), SetupError>{
 
 pub async fn unload_gpu(dbus_state: &mut DBusState, ss: &mut SystemState) -> Result<(), SetupError> {
     // Stop display manager
+    println!("Stopping Display Manager");
     stop_display_manager(dbus_state).await?;
     ss.dp_stopped = true;
     // Stop pipewire
+    println!("Stopping pipewire");
     stop_pipewire().await;
     ss.pw_stopped = true;
     // Unload kernel Modules
+    println!("Unloading nvidia Modules");
     unload_nvidia_modules(ss)?;
     // Disconnect GPU
+    println!("Disconnecting GPU");
     disconnect_gpu(ss)?;
     // Load VFIO drivers
+    println!("Loading VFIO modules");
     load_vfio_modules()?;
     ss.vfio_loaded = true;
     // Restart pipewire service
+    println!("Starting Pipewire");
     start_pipewire().await;
     ss.pw_stopped = false;
     // restart display manager
+    println!("Starting Display Manager");
     start_display_manager(dbus_state).await?;
     ss.dp_stopped = false;
     Ok(())
@@ -86,15 +93,20 @@ pub async fn unload_gpu(dbus_state: &mut DBusState, ss: &mut SystemState) -> Res
 
 pub async fn reattach_gpu(dbus_state: &mut DBusState, ss: &mut SystemState) -> Result<(), SetupError> {
     // unload vfio
+    println!("Unloading VFIO modules");
     unload_vfio_modules()?;
     ss.vfio_loaded = false;
     // reattach gpu
+    println!("Connecting GPU");
     connect_gpu(ss)?;
     // load nvidia
+    println!("Loading Nvidia Modules");
     load_nvidia_modules(ss)?;
     // restart pipewire and display manager
+    println!("Restarting Display Manager");
     restart_display_manager(dbus_state).await?;
     ss.dp_reset = true;
+    println!("Restarting Pipewire");
     restart_pipewire().await;
     ss.pw_reset = true;
     Ok(())
@@ -317,24 +329,28 @@ pub fn unload_nvidia_modules(ss: &mut SystemState) -> Result<(), SetupError> {
     if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
         return Err(SetupError::ModProbeUnloadFailed("nvidia_drm".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
     }
+    println!("Unloading nvidia_drm with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
     ss.nvidia_unloaded.0 = true;
     let out = super::call_command("modprobe", ["-r", "nvidia_uvm"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia_uvm".to_string(), err))?;
     if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
         return Err(SetupError::ModProbeUnloadFailed("nvidia_uvm".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
     }
+    println!("Unloading nvidia_uvm with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
     ss.nvidia_unloaded.1 = true;
     let out = super::call_command("modprobe", ["-r", "nvidia_modeset"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia_modeset".to_string(), err))?;
     if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
         return Err(SetupError::ModProbeUnloadFailed("nvidia_modeset".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
     }
+    println!("Unloading nvidia_modeset with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
     ss.nvidia_unloaded.2 = true;
     let out = super::call_command("modprobe", ["-r", "nvidia"])
         .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia".to_string(), err))?;
     if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
         return Err(SetupError::ModProbeUnloadFailed("nvidia".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
     }
+    println!("Unloading nvidia with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
     ss.nvidia_unloaded.3 = true;
     Ok(())
 }
