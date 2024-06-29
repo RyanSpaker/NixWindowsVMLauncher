@@ -109,10 +109,12 @@ async fn root_app(vm_type: LaunchConfig, mouse_path: String) -> Result<(), AppEr
     let mut dbus_state = dbus_server::connect_dbus().map_err(|err| AppError::BusError(err))?;
     dbus_state.create_dbus_service(vm_type.clone()).await.map_err(|err| AppError::BusError(err))?;
     let mut system_state = SystemState::new(vm_type, mouse_path);
+    println!("Starting Setup");
     // Run VM
     if let Err(err) = master::master(&mut dbus_state, &mut system_state).await {
         system_setup::cleanup(dbus_state, system_state).await;
         return Err(err);
     }
+    println!("Finished");
     Ok(())
 }
