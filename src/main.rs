@@ -111,7 +111,8 @@ async fn root_app(vm_type: LaunchConfig, mouse_path: String) -> Result<(), AppEr
     let mut system_state = SystemState::new(vm_type, mouse_path);
     println!("Starting Setup");
     // Run VM
-    if let Err(err) = master::master(&mut dbus_state, &mut system_state).await {
+    let local = tokio::task::LocalSet::new();
+    if let Err(err) = local.run_until(master::master(&mut dbus_state, &mut system_state)).await {
         println!("Starting Cleanup");
         system_setup::cleanup(dbus_state, system_state).await;
         return Err(err);
