@@ -245,7 +245,7 @@ pub async fn undo_performance_enhancements(dbus_state: &mut DBusState, ss: &mut 
 }
 
 pub async fn stop_display_manager(dbus_state: &mut DBusState) -> Result<(), SetupError> {
-    dbus_state.call_system_method::<_, (String,)>(
+    dbus_state.call_system_method::<_, (dbus::Path,)>(
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1", 
         "org.freedesktop.systemd1.Manager", 
@@ -255,7 +255,7 @@ pub async fn stop_display_manager(dbus_state: &mut DBusState) -> Result<(), Setu
 }
 
 pub async fn start_display_manager(dbus_state: &mut DBusState) -> Result<(), SetupError> {
-    dbus_state.call_system_method::<_, (String,)>(
+    dbus_state.call_system_method::<_, (dbus::Path,)>(
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1", 
         "org.freedesktop.systemd1.Manager", 
@@ -265,7 +265,7 @@ pub async fn start_display_manager(dbus_state: &mut DBusState) -> Result<(), Set
 }
 
 pub async fn restart_display_manager(dbus_state: &mut DBusState) -> Result<(), SetupError> {
-    dbus_state.call_system_method::<_, (String,)>(
+    dbus_state.call_system_method::<_, (dbus::Path,)>(
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1", 
         "org.freedesktop.systemd1.Manager", 

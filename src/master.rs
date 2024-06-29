@@ -17,6 +17,7 @@ pub async fn master(dbus_state: &mut DBusState, system_state: &mut SystemState) 
     if system_state.launch_type.dc_gpu() {
         // remove gpu
         system_setup::unload_gpu(dbus_state, system_state).await.map_err(|err| AppError::SetupError(err))?;
+        println!("GPU Disconnected");
     }
 
     // read vm xml
