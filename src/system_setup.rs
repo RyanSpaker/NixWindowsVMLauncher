@@ -145,19 +145,19 @@ pub async fn cleanup(mut dbus_state: DBusState, ss: SystemState) {
             let _ =dbus_state.call_system_method::<_, ()>(
                 "org.freedesktop.systemd1", 
                 "/org/freedesktop/systemd1/unit/user_2eslice", 
-                "org.freedesktop.Unit", 
+                "org.freedesktop.systemd1.Unit", 
                 "SetProperties", (true, vec![("AllowedCPUs", vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
             ).await;
             let _ =dbus_state.call_system_method::<_, ()>(
                 "org.freedesktop.systemd1", 
                 "/org/freedesktop/systemd1/unit/system_2eslice", 
-                "org.freedesktop.Unit", 
+                "org.freedesktop.systemd1.Unit", 
                 "SetProperties", (true, vec![("AllowedCPUs", vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
             ).await;
             let _ = dbus_state.call_system_method::<_, ()>(
                 "org.freedesktop.systemd1", 
                 "/org/freedesktop/systemd1/unit/unit_2escope", 
-                "org.freedesktop.Unit", 
+                "org.freedesktop.systemd1.Unit", 
                 "SetProperties", (true, vec![("AllowedCPUs", vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
             ).await;
         }
@@ -196,21 +196,21 @@ pub async fn performance_enhancements(dbus_state: &mut DBusState, ss: &mut Syste
     dbus_state.call_system_method::<_, ()>(
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1/unit/user_2eslice", 
-        "org.freedesktop.Unit", 
+        "org.freedesktop.systemd1.Unit", 
         "SetProperties", (true, vec![("AllowedCPUs", vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
     ).await.map_err(|err| SetupError::BusError(err))?;
     ss.cpus_limited.0 = true;
     dbus_state.call_system_method::<_, ()>(
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1/unit/system_2eslice", 
-        "org.freedesktop.Unit", 
+        "org.freedesktop.systemd1.Unit", 
         "SetProperties", (true, vec![("AllowedCPUs", vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
     ).await.map_err(|err| SetupError::BusError(err))?;
     ss.cpus_limited.1 = true;
     dbus_state.call_system_method::<_, ()>(
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1/unit/unit_2escope", 
-        "org.freedesktop.Unit", 
+        "org.freedesktop.systemd1.Unit", 
         "SetProperties", (true, vec![("AllowedCPUs", vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
     ).await.map_err(|err| SetupError::BusError(err))?;
     ss.cpus_limited.2 = true;
@@ -229,21 +229,21 @@ pub async fn undo_performance_enhancements(dbus_state: &mut DBusState, ss: &mut 
     dbus_state.call_system_method::<_, ()>(
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1/unit/user_2eslice", 
-        "org.freedesktop.Unit", 
+        "org.freedesktop.systemd1.Unit", 
         "SetProperties", (true, vec![("AllowedCPUs", vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
     ).await.map_err(|err| SetupError::BusError(err))?;
     ss.cpus_limited.0 = false;
     dbus_state.call_system_method::<_, ()>(
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1/unit/system_2eslice", 
-        "org.freedesktop.Unit", 
+        "org.freedesktop.systemd1.Unit", 
         "SetProperties", (true, vec![("AllowedCPUs", vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
     ).await.map_err(|err| SetupError::BusError(err))?;
     ss.cpus_limited.1 = false;
     dbus_state.call_system_method::<_, ()>(
         "org.freedesktop.systemd1", 
         "/org/freedesktop/systemd1/unit/unit_2escope", 
-        "org.freedesktop.Unit", 
+        "org.freedesktop.systemd1.Unit", 
         "SetProperties", (true, vec![("AllowedCPUs", vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])])
     ).await.map_err(|err| SetupError::BusError(err))?;
     ss.cpus_limited.2 = false;
