@@ -64,7 +64,7 @@
           libraries = pkgs.lib.makeLibraryPath [pkgs.libinput pkgs.dbus];
           postInstall = ''
             mv $out/bin/nixos-windows-launcher $out/bin/.nixos-windows-launcher
-            makeWrapper $out/bin/.nixos-windows-launcher $out/bin/nixos-windows-launcher --set LD_LIBRARY_PATH ${libraries} --set PATH ${pkgs.lib.makeBinPath [ pkgs.kmod pkgs.libvirt pkgs.systemd pkgs.xorg.xinput ]}
+            makeWrapper $out/bin/.nixos-windows-launcher $out/bin/nixos-windows-launcher --set LD_LIBRARY_PATH ${libraries} --set PATH ${pkgs.lib.makeBinPath (with pkgs; [ kmod libvirt systemd xorg.xinput looking-glass-client ])}
             mkdir -p $out/share/dbus-1/system.d
             cp ${src}/dbus.conf $out/share/dbus-1/system.d/org.cowsociety.vmlauncher.conf
           '';
