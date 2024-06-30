@@ -43,7 +43,7 @@ pub async fn client_app() -> Result<(), ServantError>{
         resource.await
     });
     // setup proxy
-    let proxy = nonblock::Proxy::new("org.cowsociety.vmlauncher", "/org/cowsociety/vmlauncher", std::time::Duration::from_secs(2), conn.clone());
+    let proxy = nonblock::Proxy::new("org.cowsociety.vmlauncher", "/org/cowsociety/vmlauncher", std::time::Duration::from_secs(30), conn.clone());
     // tell server that we are ready
     // wait for response
     let (id, vm_type): (u32, String) = proxy.method_call("org.cowsociety.vmlauncher.Manager", "UserReady", ()).await
