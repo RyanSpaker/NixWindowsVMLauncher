@@ -74,7 +74,7 @@ pub async fn unload_gpu(dbus_state: &mut DBusState, ss: &mut SystemState) -> Res
     ss.pw_stopped = true;
     // Unload kernel Modules
     println!("Unloading nvidia Modules");
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
     unload_nvidia_modules(ss)?;
     // Disconnect GPU
     println!("Disconnecting GPU");
