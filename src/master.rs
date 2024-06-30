@@ -48,7 +48,7 @@ pub async fn master(dbus_state: &mut DBusState, system_state: &mut SystemState) 
 
     // launch vm
     println!("Launching VM");
-    let output = super::call_command("virsh", ["-cqemu:///system", "create", "/tmp/windows_lg.xml"])
+    let output = super::call_command("virsh", ["-cqemu:///system", "create", "/tmp/windows.xml"])
         .map_err(|err| AppError::FailedToLaunchVM(err))?;
     if !output.status.success(){
         return Err(AppError::VMLaunchFailed(String::from_utf8(output.stderr).unwrap()));
