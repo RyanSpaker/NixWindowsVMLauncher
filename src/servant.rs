@@ -49,7 +49,7 @@ pub async fn client_app() -> Result<(), ServantError>{
     let (id, vm_type): (u32, String) = proxy.method_call("org.cowsociety.vmlauncher.Manager", "UserReady", ()).await
         .map_err(|err| ServantError::FailedToCallDBusMethod(err))?;
     // xinput changes
-    toggle_mouse(id, false)?;
+    let lib_id = toggle_mouse(id, false)?;
     // launch looking glass
     let mut child = if vm_type == "lg" {
         std::process::Command::new("looking-glass-client").args(["-T", "-s", "input:captureOnFocus"]).spawn()
@@ -74,7 +74,7 @@ pub async fn client_app() -> Result<(), ServantError>{
         }
     }
     // undo xinput changes
-    toggle_mouse(id, true)?;
+    toggle_mouse_known_id(lib_id, true)?;
     conn.remove_match(incoming_signal.token()).await.unwrap();
     Ok(())
 }
@@ -87,7 +87,7 @@ pub fn check_futures(child: &mut Child, signal: Arc<AtomicBool>) -> bool{
 }
 
 // Helper function to take an input id and use xinput to disable/enable the corresponding mouse
-pub fn toggle_mouse(input_id: u32, enable: bool) -> Result<(), ServantError> {
+pub fn toggle_mouse(input_id: u32, enable: bool) -> Result<u32, ServantError> {
     let event_string = "event".to_owned() + &input_id.to_string();
     let output = std::process::Command::new("xinput").args(["list", "--id-only"]).output()
         .map_err(|err| ServantError::FailedToCallXInputList(err))?.stdout;
@@ -100,5 +100,13 @@ pub fn toggle_mouse(input_id: u32, enable: bool) -> Result<(), ServantError> {
     std::process::Command::new("xinput").args([(if enable {"--enable"} else {"--disable"}).to_string(), id.to_string()]).output()
         .map_err(|err| ServantError::FailedToToggleMouse(err))?;
     if enable {println!("Enabled mouse {}", id);} else {println!("Disabled mouse {}", id);}
+    Ok(id)
+}
+
+// Helper function to take an input id and use xinput to disable/enable the corresponding mouse
+pub fn toggle_mouse_known_id(input_id: u32, enable: bool) -> Result<(), ServantError> {
+    std::process::Command::new("xinput").args([(if enable {"--enable"} else {"--disable"}).to_string(), input_id.to_string()]).output()
+        .map_err(|err| ServantError::FailedToToggleMouse(err))?;
+    if enable {println!("Enabled mouse {}", input_id);} else {println!("Disabled mouse {}", input_id);}
     Ok(())
 }
