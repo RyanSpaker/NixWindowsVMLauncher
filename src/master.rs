@@ -35,12 +35,13 @@ pub async fn master(dbus_state: &mut DBusState, system_state: &mut SystemState) 
     println!("Creating virtual mouse");
     let mouse_manager = virtual_mouse::MouseManager::new(&system_state.mouse_path)
         .map_err(|err| AppError::MouseError(err))?;
-    let mouse_id = mouse_manager.input_id.clone();
+    let input_id = mouse_manager.input_id.clone();
+    let output_id = mouse_manager.output_id.clone();
     let mouse_handle = virtual_mouse::spawn_mouse_update_loop(mouse_manager);
 
     // export finished xml
     println!("Writing finished xml");
-    system_setup::write_xml(xml.replace("VIRTUAL_MOUSE_EVENT_ID", mouse_id.to_string().as_str())).map_err(|err| AppError::SetupError(err))?;
+    system_setup::write_xml(xml.replace("VIRTUAL_MOUSE_EVENT_ID", output_id.to_string().as_str())).map_err(|err| AppError::SetupError(err))?;
 
     // quick performance enhancements
     println!("Doing performance enhancements");
@@ -56,7 +57,7 @@ pub async fn master(dbus_state: &mut DBusState, system_state: &mut SystemState) 
 
     // Inform users that the vm is launched
     println!("Informing Users of launch");
-    dbus_state.inform_users(mouse_id).await;
+    dbus_state.inform_users(input_id).await;
     
     // Wait until vm is shutdown naturally, or all users have closed the vm window
     println!("Waiting for vm to close");
