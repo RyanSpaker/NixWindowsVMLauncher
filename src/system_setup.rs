@@ -207,11 +207,11 @@ pub mod gpu {
             let _ = call_command("modprobe", ["-f", "-r", "vfio-pci"]);
         }
         // if gpu is disconnected, reconnect
-        if ss.gpu_state.gpu_attached.0 {
+        if !ss.gpu_state.gpu_attached.0 {
             println!("Connecting GPU 0");
             let _ = super::call_command("virsh", ["nodedev-reattach", "pci_0000_01_00_0"]);
         }
-        if ss.gpu_state.gpu_attached.1 {
+        if !ss.gpu_state.gpu_attached.1 {
             println!("Connecting GPU 1");
             let _ = super::call_command("virsh", ["nodedev-reattach", "pci_0000_01_00_1"]);
         }
