@@ -94,6 +94,7 @@ impl Sessions{
                         Ok(class) => {class},
                         Err(err) => {println!("Failed to get class from {}, with err {}", path, err); continue;}
                     };
+                    if c == "greeter" {continue;}
                     let n = match proxy.get::<String>("org.freedesktop.login1.Session", "Name").await{
                         Ok(name) => {name},
                         Err(err) => {println!("Failed to get name from {}, with err {}", path, err); continue;}
