@@ -1,7 +1,7 @@
 // This module is responsible for creating and managing dbus server connections
 use std::{collections::HashMap, sync::Arc};
 use dbus::{
-    arg::{AppendAll, ReadAll}, 
+    arg::{messageitem::MessageItem, AppendAll, ReadAll}, 
     channel::Channel, 
     nonblock::{stdintf::org_freedesktop_dbus::Properties, SyncConnection}, 
     strings::{BusName, Interface, Member}, 
@@ -84,7 +84,7 @@ impl DBusConnection{
         P: Into<Path<'a>>,
         I: AsRef<str>,
         N: AsRef<str>,
-        R: ReadAll + 'static + for<'b> dbus::arg::Get<'b> 
+        R: for<'b> dbus::arg::Get<'b> + 'static
     {
         self.check_system_bus().await?;
         let proxy = dbus::nonblock::Proxy::new(
@@ -96,6 +96,25 @@ impl DBusConnection{
         proxy.get(interface.as_ref(), property.as_ref()).await
             .map_err(|err| DBusError::PropertyQueryError(err))
     }
+    /// Get a property on the system bus
+    pub async fn get_system_property_untyped<'a, D, P, I, N>(&mut self, dest: D, path: P, interface: I, property: N) -> Result<MessageItem, DBusError> 
+    where 
+        D: Into<BusName<'a>>,
+        P: Into<Path<'a>>,
+        I: AsRef<str>,
+        N: AsRef<str>
+    {
+        self.check_system_bus().await?;
+        let proxy = dbus::nonblock::Proxy::new(
+            dest, 
+            path, 
+            std::time::Duration::from_secs(2), 
+            self.system_conn.clone()
+        );
+        proxy.get(interface.as_ref(), property.as_ref()).await
+            .map_err(|err| DBusError::PropertyQueryError(err))
+    }
+    
     /// Check status of system bus
     pub async fn check_system_bus(&mut self) -> Result<(), DBusError>{
         if self.system_handle.is_finished() {
@@ -117,14 +136,21 @@ impl DBusConnection{
         for (uid, name, path) in users.0.into_iter() {
             // skip if we have a valid dbus connection already
             if self.users.contains_key(&uid) {continue;}
-            let (runtime_path,): (String,) = self.get_system_property("org.freedesktop.login1", path.clone(), "org.freedesktop.login1.User", "RuntimePath").await
+            let runtime_path_untyped = self.get_system_property_untyped("org.freedesktop.login1", path.clone(), "org.freedesktop.login1.User", "RuntimePath").await
+                .map_err(|err| match err {
+                    DBusError::SystemBusLost(e) => DBusError::SystemBusLost(e),
+                    DBusError::PropertyQueryError(e) => DBusError::FailedToGetUserRuntimePath(name.to_owned(), e),
+                    _ => panic!("How did we get here?")
+                })?;
+            println!("Runtime item type: {:?}", runtime_path_untyped.arg_type());
+            let runtime_path: String = self.get_system_property("org.freedesktop.login1", path.clone(), "org.freedesktop.login1.User", "RuntimePath").await
                 .map_err(|err| match err {
                     DBusError::SystemBusLost(e) => DBusError::SystemBusLost(e),
                     DBusError::PropertyQueryError(e) => DBusError::FailedToGetUserRuntimePath(name.to_owned(), e),
                     _ => panic!("How did we get here?")
                 })?;
             //create channel and connect
-            let addr = "unix:path=".to_string() + runtime_path.to_string().as_str() + "/bus";
+            let addr = "unix:path=".to_string() + runtime_path.as_str() + "/bus";
             let channel = Self::open_channel(uid, &addr)?;
             let (resource, conn) = dbus_tokio::connection::from_channel::<dbus::nonblock::SyncConnection>(channel)
                 .map_err(|err| DBusError::FailedToConnectToUserBus(name, err))?;
