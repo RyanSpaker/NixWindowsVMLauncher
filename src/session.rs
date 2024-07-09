@@ -90,9 +90,17 @@ impl Sessions{
                         Ok((user, _)) => {user},
                         Err(err) => {println!("Failed to get user from {}, with err {}", path, err); continue;}
                     };
+                    let c = match proxy.get::<String>("org.freedesktop.login1.Session", "Class").await{
+                        Ok(class) => {class},
+                        Err(err) => {println!("Failed to get class from {}, with err {}", path, err); continue;}
+                    };
+                    let n = match proxy.get::<String>("org.freedesktop.login1.Session", "Name").await{
+                        Ok(name) => {name},
+                        Err(err) => {println!("Failed to get name from {}, with err {}", path, err); continue;}
+                    };
+                    println!("Found new Display: {} {} {} {}", u, n, c, d);
                     new_displays.push((u, d));
                 }
-                println!("Found new Displays: {:?}", new_displays);
                 // add display values
                 if let Ok(mut d) = displays.clone().lock() {
                     d.extend(new_displays.into_iter());
@@ -118,18 +126,24 @@ impl Sessions{
                     let _ = users::switch::set_effective_uid(*uid);
                     let child = match vm_type {
                         LaunchConfig::LG => {
-                            let log: Stdio = if let Ok(file) = File::create("/tmp/user_".to_string() + uid.to_string().as_str() + "_lg_log.txt") {file.into()} else {Stdio::null()};
+                            let (log, err_log): (Stdio, Stdio) = if let Ok(file) = File::create("/tmp/user_".to_string() + uid.to_string().as_str() + "_lg_log.txt") {
+                                (file.try_clone().unwrap().into(), file.into())
+                            } else {(Stdio::null(), Stdio::null())};
                             tokio::process::Command::new("looking-glass-client")
                                 .args(["-T", "-s", "input:captureOnFocus"])
                                 .env("DISPLAY", display)
-                                .stdout(log).spawn()
+                                .uid(*uid)
+                                .stdout(log).stderr(err_log).spawn()
                         },
                         LaunchConfig::Spice => {
-                            let log: Stdio = if let Ok(file) = File::create("/tmp/user_".to_string() + uid.to_string().as_str() + "_virtviewer_log.txt") {file.into()} else {Stdio::null()};
+                            let (log, err_log): (Stdio, Stdio) = if let Ok(file) = File::create("/tmp/user_".to_string() + uid.to_string().as_str() + "_virtviewer_log.txt") {
+                                (file.try_clone().unwrap().into(), file.into())
+                            } else {(Stdio::null(), Stdio::null())};
                             tokio::process::Command::new("virt-viewer")
                                 .args(["--connect", "qemu:///system", "windows"])
                                 .env("DISPLAY", display)
-                                .stdout(log).spawn()
+                                .uid(*uid)
+                                .stdout(log).stderr(err_log).spawn()
                         },
                         _ => panic!("How did we get here?")
                     };

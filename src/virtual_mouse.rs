@@ -27,7 +27,7 @@ pub enum MouseError{
     FailedToEmitMouseEvents(std::io::Error),
     FailedToCallXInputList(std::io::Error),
     FailedToConvertOutputToString(FromUtf8Error),
-    FailedToFindMouseIDFromXInput,
+    FailedToFindMouseIDFromXInput(Vec<u32>),
     FailedToToggleMouse(std::io::Error),
     FailedToAddSignalMatchToSystemBus(dbus::Error),
     FailedToGetCurrentSessions(dbus::Error),
@@ -55,7 +55,7 @@ impl ToString for MouseError{
             MouseError::FailedToEmitMouseEvents(err) => format!("Could not emit mouse events on virtual device: {}", *err),
             MouseError::FailedToCallXInputList(err) => format!("Call to xinput list failed: {}", *err),
             MouseError::FailedToConvertOutputToString(err) => format!("Could not convert xinput list output to string: {}", *err),
-            MouseError::FailedToFindMouseIDFromXInput => format!("Finding mouse id from xinput list failed"),
+            MouseError::FailedToFindMouseIDFromXInput(ids) => format!("Finding mouse id from xinput list failed with ids: {:?}", *ids),
             MouseError::FailedToToggleMouse(err) => format!("Toggling mouse with xinput --enable/disable failed: {}", *err),
             MouseError::FailedToAddSignalMatchToSystemBus(err) => format!("Could not add signal match for SessionNew on the system bus: {}", *err),
             MouseError::FailedToGetCurrentSessions(err) => format!("Failed to call ListSession on login1: {}", *err),
@@ -304,12 +304,12 @@ pub fn toggle_mouse(input_id: u32, enable: bool) -> Result<u32, MouseError> {
         .map_err(|err| MouseError::FailedToCallXInputList(err))?.stdout;
     let output_text = String::from_utf8(output).map_err(|err| MouseError::FailedToConvertOutputToString(err))?;
     let ids = output_text.split("\n").filter_map(|id| id.parse::<u32>().ok()).collect::<Vec<u32>>();
-    let id = ids.into_iter().find(|id| {
-        std::process::Command::new("xinput").args(["list-props", id.to_string().as_str()]).output()
+    let id = ids.iter().find(|id| {
+        std::process::Command::new("xinput").args(["list-props", (**id).to_string().as_str()]).output()
             .ok().map(|output| String::from_utf8(output.stdout).ok()).flatten().is_some_and(|props| props.contains(event_string.as_str()))
-    }).ok_or(MouseError::FailedToFindMouseIDFromXInput)?;
+    }).ok_or(MouseError::FailedToFindMouseIDFromXInput(ids.clone()))?;
     std::process::Command::new("xinput").args([(if enable {"--enable"} else {"--disable"}).to_string(), id.to_string()]).output()
         .map_err(|err| MouseError::FailedToToggleMouse(err))?;
     if enable {println!("Enabled mouse {}", id);} else {println!("Disabled mouse {}", id);}
-    Ok(id)
+    Ok(*id)
 }

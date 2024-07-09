@@ -128,7 +128,10 @@ pub mod gpu {
             }
             // test to make sure necessary processes are gone
             let output = String::from_utf8_lossy(&call_command("ps", ["-u", "root"]).unwrap().stdout).to_string();
-            if output.contains("sddm") || output.contains("X") {continue;};
+            if output.contains("sddm") || output.contains("X") {
+                tokio::time::sleep(Duration::from_secs_f32(0.1)).await;
+                continue;
+            };
             break;
         }
         // Unload nvidia kernel modules
