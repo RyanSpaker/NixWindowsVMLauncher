@@ -72,7 +72,8 @@ async fn main() -> Result<(), AppError>{
             }
             let mut ss = SystemState::new().map_err(|err| AppError::DBusError(err))?;
             let result = root_app(&mut ss, default, arguments[1].to_owned()).await;
-            println!("Finished, Starting Cleanup");
+            println!("Finished, with result: {:?}", result);
+            println!("Starting Cleanup");
             cleanup(ss).await;
             println!("Cleanup Finished");
             result
@@ -147,14 +148,18 @@ async fn root_app(ss: &mut SystemState, vm_type: LaunchConfig, mouse_path: Strin
 /// reverts pc configuration
 async fn cleanup(mut ss: SystemState){
     // reverse performance
+    println!("Reverting Performance Enhancements");
     revert_performance_enhancements(&mut ss).await;
     // kill session handlers
+    println!("Ending Session Handlers");
     if let Some(handle) = ss.mouse.handle.as_mut() {handle.abort();}
     if let Some(handle) = ss.mouse.session_handle.as_mut() {handle.abort();}
     if let Some(handle) = ss.session.viewer_hadle.as_mut() {handle.abort();}
     if let Some(handle) = ss.session.session_handle.as_mut() {handle.abort();}
     // unlock mouse
+    println!("Resetting Mouse Locks");
     virtual_mouse::MouseManager::reset_sessions(&mut ss).await;
     // revert gpu state,
+    println!("Resetting GPU config");
     system_setup::gpu::cleanup(&mut ss).await;
 }

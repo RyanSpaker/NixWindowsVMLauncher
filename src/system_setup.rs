@@ -87,8 +87,9 @@ pub mod gpu {
         ).await.map_err(|err| GpuSetupError::FailedToStopDP(err))?;
         ss.gpu_state.dp_state = ServiceState::Stopped;
         // Stop pipewire
-        println!("Stopping Pipewire");
+        println!("Connecting to Users");
         ss.dbus.connect_users().await.map_err(|err| GpuSetupError::FailedToConnectUsers(err))?;
+        println!("Stopping Pipewire");
         let pw_stop_jobs: HashMap<u32, (Path,)> = ss.dbus.call_user_method(
             "org.freedesktop.systemd1", 
             "/org/freedesktop/systemd1", 
@@ -97,6 +98,7 @@ pub mod gpu {
             ("pipewire.socket", "replace")
         ).await.map_err(|err| GpuSetupError::FailedToStopPW(err))?;
         ss.gpu_state.pw_state = ServiceState::Stopped;
+        println!("Stopping Pipewire-Pulse");
         let pwp_stop_jobs: HashMap<u32, (Path,)> = ss.dbus.call_user_method(
             "org.freedesktop.systemd1", 
             "/org/freedesktop/systemd1", 
@@ -201,26 +203,33 @@ pub mod gpu {
         let mut pw_reset = false;
         // if vfio loaded, unload
         if let ModuleState::Loaded = ss.gpu_state.vfio {
+            println!("Unloading VFIO");
             let _ = call_command("modprobe", ["-f", "-r", "vfio-pci"]);
         }
         // if gpu is disconnected, reconnect
         if ss.gpu_state.gpu_attached.0 {
+            println!("Connecting GPU 0");
             let _ = super::call_command("virsh", ["nodedev-reattach", "pci_0000_01_00_0"]);
         }
         if ss.gpu_state.gpu_attached.1 {
+            println!("Connecting GPU 1");
             let _ = super::call_command("virsh", ["nodedev-reattach", "pci_0000_01_00_1"]);
         }
         // if nvidia unloaded, load
         if let ModuleState::Unloaded = ss.gpu_state.nvidia[3] {
+            println!("Loading nvidia");
             let _ = super::call_command("modprobe", ["nvidia"]);
         }
         if let ModuleState::Unloaded = ss.gpu_state.nvidia[2] {
+            println!("Loading nvidia_modeset");
             let _ = super::call_command("modprobe", ["nvidia_modeset"]);
         }
         if let ModuleState::Unloaded = ss.gpu_state.nvidia[1] {
+            println!("Loading nvidia_drm");
             let _ = super::call_command("modprobe", ["nvidia_drm"]);
         }
         if let ModuleState::Unloaded = ss.gpu_state.nvidia[0] {
+            println!("Loading nvidia_uvm");
             dp_reset = true;
             pw_reset = true;
             let _ = super::call_command("modprobe", ["nvidia_uvm"]);
@@ -230,7 +239,9 @@ pub mod gpu {
         if let ServiceState::Stopped = ss.gpu_state.dp_state {dp_reset = true;}
         if ss.dbus.check_system_bus().await.is_err() {return;}
         if pw_reset {
+            println!("Connecting Users");
             let _ = ss.dbus.connect_users().await;
+            println!("Restarting PW");
             let _: Result<HashMap<u32, (Path,)>, DBusError> = ss.dbus.call_user_method(
                 "org.freedesktop.systemd1", 
                 "/org/freedesktop/systemd1", 
@@ -238,6 +249,7 @@ pub mod gpu {
                 "ReloadOrRestartUnit", 
                 ("pipewire.socket", "replace")
             ).await;
+            println!("Restarting PWP");
             let _: Result<HashMap<u32, (Path,)>, DBusError> = ss.dbus.call_user_method(
                 "org.freedesktop.systemd1", 
                 "/org/freedesktop/systemd1", 
@@ -247,6 +259,7 @@ pub mod gpu {
             ).await;
         }
         if dp_reset {
+            println!("Restarting DP");
             let _: Result<(Path,), DBusError> = ss.dbus.call_system_method(
                 "org.freedesktop.systemd1", 
                 "/org/freedesktop/systemd1", 
