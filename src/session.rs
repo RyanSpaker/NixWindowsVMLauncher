@@ -78,17 +78,17 @@ impl Sessions{
                 for path in new_sessions.into_iter(){
                     let proxy = dbus::nonblock::Proxy::new(
                         "org.freedesktop.login1", 
-                        path,
+                        &path,
                         std::time::Duration::from_secs(2), 
                         system_conn.clone()
                     );
-                    let d = match proxy.get::<(String,)>("org.freedesktop.login1.Session", "Display").await{
-                        Ok((display,)) => {display},
-                        _ => {continue;}
+                    let d = match proxy.get::<String>("org.freedesktop.login1.Session", "Display").await{
+                        Ok(display) => {display},
+                        Err(err) => {println!("Failed to get display from {}, with err {}", path, err); continue;}
                     };
                     let u = match proxy.get::<(u32,dbus::Path)>("org.freedesktop.login1.Session", "User").await{
                         Ok((user, _)) => {user},
-                        _ => {continue;}
+                        Err(err) => {println!("Failed to get user from {}, with err {}", path, err); continue;}
                     };
                     new_displays.push((u, d));
                 }
