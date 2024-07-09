@@ -65,7 +65,7 @@
           libraries = pkgs.lib.makeLibraryPath [pkgs.libinput pkgs.dbus];
           postInstall = ''
             mv $out/bin/nixos-windows-launcher $out/bin/.nixos-windows-launcher
-            makeWrapper $out/bin/.nixos-windows-launcher $out/bin/nixos-windows-launcher --set LD_LIBRARY_PATH ${libraries} --set PATH ${pkgs.lib.makeBinPath (with pkgs; [ kmod libvirt xorg.xinput looking-glass-client virt-viewer ])}
+            makeWrapper $out/bin/.nixos-windows-launcher $out/bin/nixos-windows-launcher --set LD_LIBRARY_PATH ${libraries} --set PATH ${pkgs.lib.makeBinPath (with pkgs; [ kmod libvirt xorg.xinput looking-glass-client virt-viewer ps ])}
           '';
         };
       }

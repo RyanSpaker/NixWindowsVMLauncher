@@ -136,13 +136,6 @@ impl DBusConnection{
         for (uid, name, path) in users.0.into_iter() {
             // skip if we have a valid dbus connection already
             if self.users.contains_key(&uid) {continue;}
-            let runtime_path_untyped = self.get_system_property_untyped("org.freedesktop.login1", path.clone(), "org.freedesktop.login1.User", "RuntimePath").await
-                .map_err(|err| match err {
-                    DBusError::SystemBusLost(e) => DBusError::SystemBusLost(e),
-                    DBusError::PropertyQueryError(e) => DBusError::FailedToGetUserRuntimePath(name.to_owned(), e),
-                    _ => panic!("How did we get here?")
-                })?;
-            println!("Runtime item type: {:?}", runtime_path_untyped.arg_type());
             let runtime_path: String = self.get_system_property("org.freedesktop.login1", path.clone(), "org.freedesktop.login1.User", "RuntimePath").await
                 .map_err(|err| match err {
                     DBusError::SystemBusLost(e) => DBusError::SystemBusLost(e),
