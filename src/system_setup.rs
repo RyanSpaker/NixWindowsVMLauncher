@@ -127,7 +127,7 @@ pub mod gpu {
                 }
             }
             // test to make sure necessary processes are gone
-            if call_command("ps", ["-u", "root", "|", "grep", "-E", "-i", "-w", "'sddm|X'"]).unwrap().status.success(){continue;};
+            if call_command("ps", ["-u", "root", "|", "grep", "-E", "-i", "-w", "'sddm|X|nvidia'"]).unwrap().status.success(){continue;};
             break;
         }
         // Unload nvidia kernel modules
