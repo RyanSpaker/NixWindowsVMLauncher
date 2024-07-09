@@ -127,10 +127,8 @@ pub mod gpu {
                 }
             }
             // test to make sure necessary processes are gone
-            let output = call_command("ps", ["-u", "root", "|", "grep", "-E", "-i", "-w", "'sddm|X|nvidia'"]).unwrap();
-            println!("Processes: {:?}", String::from_utf8_lossy(&output.stdout));
-            println!("Processes err: {:?}", String::from_utf8_lossy(&output.stderr));
-            if output.status.success(){continue;};
+            let output = String::from_utf8_lossy(&call_command("ps", ["-u", "root"]).unwrap().stdout).to_string();
+            if output.contains("nvidia") || output.contains("sddm") || output.contains("X") {continue;};
             break;
         }
         // Unload nvidia kernel modules
