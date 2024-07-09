@@ -1,412 +1,383 @@
-use std::{env::{self, VarError}, fs::File, io::{Read, Write}, path::Path, time::Duration};
+use std::{env::{self, VarError}, ffi::OsStr, fs::File, io::{Read, Write}, path::Path, process::{Output, Stdio}};
 use dbus::arg::Variant;
+use tokio::task::JoinHandle;
 
-use crate::{dbus_server::{DBusError, DBusState}, LaunchConfig, SystemState};
+use crate::{dbus_manager::DBusError, LaunchConfig, SystemState};
+
+// Calls the command with the args
+pub fn call_command<I, S>(command: &str, args: I) -> std::io::Result<Output>
+where I: IntoIterator<Item = S>, S: AsRef<OsStr> {
+    std::process::Command::new(command).args(args).stderr(Stdio::piped()).stdout(Stdio::piped()).output()
+}
+
+pub mod gpu {
+    use std::{collections::HashMap, time::Duration};
+    use dbus::Path;
+    use crate::{dbus_manager::DBusError, SystemState, system_setup::call_command};
+
+    /// Represents all fail state for the process of disconnecting the gpu from linux
+    #[derive(Debug)]
+    pub enum GpuSetupError{
+        FailedToStopDP(DBusError),
+        FailedToConnectUsers(DBusError),
+        FailedToStopPW(DBusError),
+        FailedToStopPWP(DBusError),
+        FailedToUnloadKernelModule(String, std::io::Error),
+        ModprobeRemoveReturnedErr(String, String),
+        FailedToDisconnectGPU(String, std::io::Error),
+        FailedToLoadKernelModule(String, std::io::Error),
+        FailedToStartPW(DBusError),
+        FailedToStartPWP(DBusError),
+        FailedToStartDP(DBusError)
+    }
+    impl ToString for GpuSetupError{
+        fn to_string(&self) -> String {
+            match self{
+                Self::FailedToStopDP(err) => format!("Could not stop the display manager wuth err: {}", err.to_string()),
+                Self::FailedToConnectUsers(err) => format!("Could not connect to user busses: {}", err.to_string()),
+                Self::FailedToStopPW(err) => format!("Could not stop users pipewire.socket: {}", err.to_string()),
+                Self::FailedToStopPWP(err) => format!("Could not stop users pipewire-pulse.socket: {}", err.to_string()),
+                Self::FailedToUnloadKernelModule(name, err) => format!("Could not unload kernel module: {}, with err: {}", *name, *err),
+                Self::ModprobeRemoveReturnedErr(name, err) => format!("Modprobe while unloading {}, returned error: {}", *name, *err),
+                Self::FailedToDisconnectGPU(pci, err) => format!("Could not use virsh to dc {}, with error: {}", *pci, *err),
+                Self::FailedToLoadKernelModule(name, err) => format!("Could not load module: {}, with error: {}", *name, *err),
+                Self::FailedToStartPW(err) => format!("Could not start users pipewire.socket: {}", err.to_string()),
+                Self::FailedToStartPWP(err) => format!("Could not start users pipewire-pulse.socket: {}", err.to_string()),
+                Self::FailedToStartDP(err) => format!("Could not start the display manager wuth err: {}", err.to_string())
+            }
+        }
+    }
+    
+    /// Represents the state of actions taken during gpu setup
+    pub struct GpuSetupState{
+        pub dp_state: ServiceState,
+        pub pw_state: ServiceState,
+        pub pwp_state: ServiceState,
+        pub vfio: ModuleState,
+        pub gpu_attached: (bool, bool),
+        pub nvidia: [ModuleState; 4]
+    }
+    impl Default for GpuSetupState{
+        fn default() -> Self {
+            Self{dp_state: ServiceState::Untouched, pw_state: ServiceState::Untouched, pwp_state: ServiceState::Untouched, vfio: ModuleState::Unloaded, gpu_attached: (true, true), nvidia: [ModuleState::Loaded; 4]}
+        }
+    }
+    #[derive(Clone, Copy)]
+    pub enum ModuleState{
+        Loaded,
+        Unloaded
+    }
+    pub enum ServiceState{
+        Untouched,
+        Stopped,
+        Started,
+        Reset
+    }
+    
+    /// Removes the gpu from the system
+    pub async fn dc_gpu(ss: &mut SystemState) -> Result<(), GpuSetupError> {
+        // Stop display manager
+        println!("Stopping Display Manager");
+        let (dp_stop_job,): (Path,) = ss.dbus.call_system_method(
+            "org.freedesktop.systemd1", 
+            "/org/freedesktop/systemd1", 
+            "org.freedesktop.systemd1.Manager", 
+            "StopUnit", 
+            ("display-manager.service", "replace")
+        ).await.map_err(|err| GpuSetupError::FailedToStopDP(err))?;
+        ss.gpu_state.dp_state = ServiceState::Stopped;
+        // Stop pipewire
+        println!("Stopping Pipewire");
+        ss.dbus.connect_users().await.map_err(|err| GpuSetupError::FailedToConnectUsers(err))?;
+        let pw_stop_jobs: HashMap<u32, (Path,)> = ss.dbus.call_user_method(
+            "org.freedesktop.systemd1", 
+            "/org/freedesktop/systemd1", 
+            "org.freedesktop.systemd1.Manager", 
+            "StopUnit", 
+            ("pipewire.socket", "replace")
+        ).await.map_err(|err| GpuSetupError::FailedToStopPW(err))?;
+        ss.gpu_state.pw_state = ServiceState::Stopped;
+        let pwp_stop_jobs: HashMap<u32, (Path,)> = ss.dbus.call_user_method(
+            "org.freedesktop.systemd1", 
+            "/org/freedesktop/systemd1", 
+            "org.freedesktop.systemd1.Manager", 
+            "StopUnit", 
+            ("pipewire-pulse.socket", "replace")
+        ).await.map_err(|err| GpuSetupError::FailedToStopPWP(err))?;
+        ss.gpu_state.pwp_state = ServiceState::Stopped;
+        // Wait for stop jobs
+        loop{
+            println!("Waiting for all stop jobs to finish");
+            if ss.dbus.get_system_property::<_, _, _, _, (String,)>("org.freedesktop.systemd1", dp_stop_job.clone(), "org.freedesktop.systemd1.Job", "State").await.is_ok() {
+                tokio::time::sleep(Duration::from_secs_f32(0.1)).await;
+                continue;
+            }
+            for (_, (path,)) in pw_stop_jobs.iter() {
+                if ss.dbus.get_user_property::<_, _, _, _, (String,)>("org.freedesktop.systemd1", path.to_owned(), "org.freedesktop.systemd1.Job", "State").await.is_ok() {
+                    tokio::time::sleep(Duration::from_secs_f32(0.1)).await;
+                    continue;
+                }
+            }
+            for (_, (path,)) in pwp_stop_jobs.iter() {
+                if ss.dbus.get_user_property::<_, _, _, _, (String,)>("org.freedesktop.systemd1", path.to_owned(), "org.freedesktop.systemd1.Job", "State").await.is_ok() {
+                    tokio::time::sleep(Duration::from_secs_f32(0.1)).await;
+                    continue;
+                }
+            }
+            break;
+        }
+        // Unload nvidia kernel modules
+        println!("Unloading Nvidia Modules");
+        let out = call_command("modprobe", ["-f", "-r", "nvidia_uvm"])
+            .map_err(|err| GpuSetupError::FailedToUnloadKernelModule("nvidia_uvm".to_string(), err))?;
+        if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+            return Err(GpuSetupError::ModprobeRemoveReturnedErr("nvidia_uvm".to_string(), String::from_utf8(out.stderr.clone()).unwrap()));
+        }
+        ss.gpu_state.nvidia[0] = ModuleState::Unloaded;
+        let out = call_command("modprobe", ["-f", "-r", "nvidia_drm"])
+            .map_err(|err| GpuSetupError::FailedToUnloadKernelModule("nvidia_drm".to_string(), err))?;
+        if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+            return Err(GpuSetupError::ModprobeRemoveReturnedErr("nvidia_drm".to_string(), String::from_utf8(out.stderr.clone()).unwrap()));
+        }
+        ss.gpu_state.nvidia[1] = ModuleState::Unloaded;
+        let out = call_command("modprobe", ["-f", "-r", "nvidia_modeset"])
+            .map_err(|err| GpuSetupError::FailedToUnloadKernelModule("nvidia_modeset".to_string(), err))?;
+        if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+            return Err(GpuSetupError::ModprobeRemoveReturnedErr("nvidia_modeset".to_string(), String::from_utf8(out.stderr.clone()).unwrap()));
+        }
+        ss.gpu_state.nvidia[2] = ModuleState::Unloaded;
+        let out = call_command("modprobe", ["-f", "-r", "nvidia"])
+            .map_err(|err| GpuSetupError::FailedToUnloadKernelModule("nvidia".to_string(), err))?;
+        if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+            return Err(GpuSetupError::ModprobeRemoveReturnedErr("nvidia".to_string(), String::from_utf8(out.stderr.clone()).unwrap()));
+        }
+        ss.gpu_state.nvidia[3] = ModuleState::Unloaded;
+        // Disconnect GPU
+        println!("Disconnecting GPU");
+        call_command("virsh", ["nodedev-detach", "pci_0000_01_00_0"])
+            .map_err(|err| GpuSetupError::FailedToDisconnectGPU("pci_0000_01_00_0".to_string(), err))?;
+        ss.gpu_state.gpu_attached.0 = false;
+        call_command("virsh", ["nodedev-detach", "pci_0000_01_00_1"])
+            .map_err(|err| GpuSetupError::FailedToDisconnectGPU("pci_0000_01_00_1".to_string(), err))?;
+        ss.gpu_state.gpu_attached.1 = false;
+        // Load VFIO drivers
+        println!("Loading VFIO modules");
+        super::call_command("modprobe", ["vfio-pci"])
+            .map_err(|err| GpuSetupError::FailedToLoadKernelModule("vfio-pci".to_string(), err))?;
+        ss.gpu_state.vfio = ModuleState::Loaded;
+        // Restart pipewire service
+        println!("Starting Pipewire");
+        let _: HashMap<u32, (Path,)> = ss.dbus.call_user_method(
+            "org.freedesktop.systemd1", 
+            "/org/freedesktop/systemd1", 
+            "org.freedesktop.systemd1.Manager", 
+            "StartUnit", 
+            ("pipewire.socket", "replace")
+        ).await.map_err(|err| GpuSetupError::FailedToStartPW(err))?;
+        ss.gpu_state.pw_state = ServiceState::Started;
+        let _: HashMap<u32, (Path,)> = ss.dbus.call_user_method(
+            "org.freedesktop.systemd1", 
+            "/org/freedesktop/systemd1", 
+            "org.freedesktop.systemd1.Manager", 
+            "StartUnit", 
+            ("pipewire-pulse.socket", "replace")
+        ).await.map_err(|err| GpuSetupError::FailedToStartPWP(err))?;
+        ss.gpu_state.pwp_state = ServiceState::Started;
+        // restart display manager
+        println!("Starting Display Manager");
+        let _: (Path,) = ss.dbus.call_system_method(
+            "org.freedesktop.systemd1", 
+            "/org/freedesktop/systemd1", 
+            "org.freedesktop.systemd1.Manager", 
+            "StartUnit", 
+            ("display-manager.service", "replace")
+        ).await.map_err(|err| GpuSetupError::FailedToStartDP(err))?;
+        ss.gpu_state.dp_state = ServiceState::Started;
+        Ok(())
+    }
+    /// undoes gpu meddling
+    pub async fn cleanup(ss: &mut SystemState) {
+        let mut dp_reset = false;
+        let mut pw_reset = false;
+        // if vfio loaded, unload
+        if let ModuleState::Loaded = ss.gpu_state.vfio {
+            let _ = call_command("modprobe", ["-f", "-r", "vfio-pci"]);
+        }
+        // if gpu is disconnected, reconnect
+        if ss.gpu_state.gpu_attached.0 {
+            let _ = super::call_command("virsh", ["nodedev-reattach", "pci_0000_01_00_0"]);
+        }
+        if ss.gpu_state.gpu_attached.1 {
+            let _ = super::call_command("virsh", ["nodedev-reattach", "pci_0000_01_00_1"]);
+        }
+        // if nvidia unloaded, load
+        if let ModuleState::Unloaded = ss.gpu_state.nvidia[3] {
+            let _ = super::call_command("modprobe", ["nvidia"]);
+        }
+        if let ModuleState::Unloaded = ss.gpu_state.nvidia[2] {
+            let _ = super::call_command("modprobe", ["nvidia_modeset"]);
+        }
+        if let ModuleState::Unloaded = ss.gpu_state.nvidia[1] {
+            let _ = super::call_command("modprobe", ["nvidia_drm"]);
+        }
+        if let ModuleState::Unloaded = ss.gpu_state.nvidia[0] {
+            dp_reset = true;
+            pw_reset = true;
+            let _ = super::call_command("modprobe", ["nvidia_uvm"]);
+        }
+        if let ServiceState::Stopped = ss.gpu_state.pw_state {pw_reset = true;} 
+        if let ServiceState::Stopped = ss.gpu_state.pwp_state {pw_reset = true;}
+        if let ServiceState::Stopped = ss.gpu_state.dp_state {dp_reset = true;}
+        if ss.dbus.check_system_bus().await.is_err() {return;}
+        if pw_reset {
+            let _ = ss.dbus.connect_users().await;
+            let _: Result<HashMap<u32, (Path,)>, DBusError> = ss.dbus.call_user_method(
+                "org.freedesktop.systemd1", 
+                "/org/freedesktop/systemd1", 
+                "org.freedesktop.systemd1.Manager", 
+                "ReloadOrRestartUnit", 
+                ("pipewire.socket", "replace")
+            ).await;
+            let _: Result<HashMap<u32, (Path,)>, DBusError> = ss.dbus.call_user_method(
+                "org.freedesktop.systemd1", 
+                "/org/freedesktop/systemd1", 
+                "org.freedesktop.systemd1.Manager", 
+                "ReloadOrRestartUnit", 
+                ("pipewire-pulse.socket", "replace")
+            ).await;
+        }
+        if dp_reset {
+            let _: Result<(Path,), DBusError> = ss.dbus.call_system_method(
+                "org.freedesktop.systemd1", 
+                "/org/freedesktop/systemd1", 
+                "org.freedesktop.systemd1.Manager", 
+                "RestartUnit", 
+                ("display-manager.service", "replace")
+            ).await;
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum SetupError{
-    BusError(DBusError),
-    FailedToUnloadKernelModule(String, std::io::Error),
-    FailedToLoadKernelModule(String, std::io::Error),
-    FailedToDetachGPU(String, std::io::Error),
-    FailedToAttachGPU(String, std::io::Error),
+    FailedToSetAllowedCPUs(DBusError),
     FailedToReadCPUDir(std::io::Error),
-    FailedToCreateCPUFile(std::io::Error),
-    FailedToWriteCPUGovernor(std::io::Error),
-    FailedToGetEnvVar(String, VarError),
-    FailedToReadXmlFile(std::io::Error),
+    FailedToFindVmXmlVar(VarError),
+    FailedToOpenVmXmlFile(std::io::Error),
+    FailedToReadVmXmlFile(std::io::Error),
     FailedToCreateTmpXmlFile(std::io::Error),
     FailedToWriteTmpXmlFile(std::io::Error),
-    ModProbeUnloadFailed(String, String, String)
+    FailedToLaunchVM(std::io::Error),
+    CouldNotCreateWindowsLogFile(std::io::Error)
 }
 impl ToString for SetupError{
     fn to_string(&self) -> String {
         match self{
-            SetupError::BusError(err) => err.to_string(),
-            SetupError::FailedToUnloadKernelModule(name, err) => format!("Failed to unload kernel module {} with error: {}", *name, *err),
-            SetupError::FailedToLoadKernelModule(name, err) => format!("Failed to load kernel module {} with error: {}", *name, *err),
-            SetupError::FailedToDetachGPU(pci, err) => format!("Failed to detach pci_device {} with error: {}", *pci, *err),
-            SetupError::FailedToAttachGPU(pci, err) => format!("Failed to reattach pci_device {} with error: {}", *pci, *err),
-            SetupError::FailedToReadCPUDir(err) => format!("Failed to read the sys/device/system/cpu dir: {}", *err),
-            SetupError::FailedToCreateCPUFile(err) => format!("Failed to open as write file at /sys/device/system/cpu/cpu*/cpufreq/scaling_governor: {}", *err),
-            SetupError::FailedToWriteCPUGovernor(err) => format!("Failed to write to file at /sys/device/system/cpu/cpu*/cpufreq/scaling_governor: {}", *err),
-            SetupError::FailedToGetEnvVar(name, err) => format!("Failed to get env var {} with error: {}", *name, *err),
-            SetupError::FailedToReadXmlFile(err) => format!("Failed to read vm xml file: {}", *err),
-            SetupError::FailedToCreateTmpXmlFile(err) => format!("Failed to create the /tmp/windows.xml file: {}", *err),
-            SetupError::FailedToWriteTmpXmlFile(err) => format!("Failed to write to /tmp/windows.xml: {}", *err),
-            SetupError::ModProbeUnloadFailed(name, out, err) => format!("Failed to unload module {} with stdout: {}, and stderr: {}", *name, *out, *err)
+            SetupError::FailedToSetAllowedCPUs(err) => format!("Could not set allowed cpus: {}", err.to_string()),
+            SetupError::FailedToReadCPUDir(err) => format!("Could not read the cpu dir: {}", *err),
+            SetupError::FailedToFindVmXmlVar(err) => format!("Could not find the vm xml env variable: {}", *err),
+            SetupError::FailedToOpenVmXmlFile(err) => format!("Could not open vm xml file: {}", *err),
+            SetupError::FailedToReadVmXmlFile(err) => format!("Could not read vm xml file: {}", *err),
+            SetupError::FailedToCreateTmpXmlFile(err) => format!("Could not create the temp xml file: {}", *err),
+            SetupError::FailedToWriteTmpXmlFile(err) => format!("Could not write to temp xml file: {}", *err),
+            SetupError::FailedToLaunchVM(err) => format!("Could not launch the vm: {}", *err),
+            SetupError::CouldNotCreateWindowsLogFile(err) => format!("Could not create /tmp/windows_vm_log.txt: {}", *err)
         }
     }
 }
 
-pub fn get_vm_xml(vm_type: LaunchConfig) -> Result<String, SetupError>{
+#[derive(Default, Debug)]
+pub struct PerformanceState{
+    cpu_limited: [bool; 3],
+    governor_performance: bool,
+    governor_files: Vec<File>
+}
+/// Performs quick and easy performance enhancements
+pub async fn performance_enhancements(ss: &mut SystemState) -> Result<(), SetupError> {
+    let _: () = ss.dbus.call_system_method(
+        "org.freedesktop.systemd1", 
+        "/org/freedesktop/systemd1/unit/user_2eslice", 
+        "org.freedesktop.systemd1.Unit", 
+        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
+    ).await.map_err(|err| SetupError::FailedToSetAllowedCPUs(err))?;
+    ss.performance.cpu_limited[0] = true;
+    let _: () = ss.dbus.call_system_method(
+        "org.freedesktop.systemd1", 
+        "/org/freedesktop/systemd1/unit/system_2eslice", 
+        "org.freedesktop.systemd1.Unit", 
+        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
+    ).await.map_err(|err| SetupError::FailedToSetAllowedCPUs(err))?;
+    ss.performance.cpu_limited[1] = true;
+    let _: () = ss.dbus.call_system_method(
+        "org.freedesktop.systemd1", 
+        "/org/freedesktop/systemd1/unit/unit_2escope", 
+        "org.freedesktop.systemd1.Unit", 
+        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
+    ).await.map_err(|err| SetupError::FailedToSetAllowedCPUs(err))?;
+    ss.performance.cpu_limited[2] = true;
+    let mut files = Path::new("/sys/devices/system/cpu/").read_dir().map_err(|err| SetupError::FailedToReadCPUDir(err))?
+        .into_iter().flatten().filter_map(|dir| {
+            if dir.file_type().unwrap().is_file() || !dir.file_name().to_str().unwrap().starts_with("cpu") {return None;}
+            File::create(dir.path().join("cpufreq/scaling_governor")).ok()
+        }).collect::<Vec<File>>();
+    for file in files.iter_mut(){
+        let _ =file.write("performance".as_bytes());
+    }
+    ss.performance.governor_files = files;
+    ss.performance.governor_performance = true;
+    Ok(())
+}
+/// Undoes any performance enhancements
+pub async fn revert_performance_enhancements(ss: &mut SystemState) {
+    if ss.performance.governor_performance {
+        for file in ss.performance.governor_files.iter_mut() {
+            let _ = file.write("powersave".as_bytes());
+        }        
+    }
+    if ss.dbus.check_system_bus().await.is_ok() {
+        let _: Result<(), DBusError> = ss.dbus.call_system_method(
+            "org.freedesktop.systemd1", 
+            "/org/freedesktop/systemd1/unit/user_2eslice", 
+            "org.freedesktop.systemd1.Unit", 
+            "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
+        ).await;
+        let _: Result<(), DBusError> = ss.dbus.call_system_method(
+            "org.freedesktop.systemd1", 
+            "/org/freedesktop/systemd1/unit/system_2eslice", 
+            "org.freedesktop.systemd1.Unit", 
+            "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
+        ).await;
+        let _: Result<(), DBusError> = ss.dbus.call_system_method(
+            "org.freedesktop.systemd1", 
+            "/org/freedesktop/systemd1/unit/unit_2escope", 
+            "org.freedesktop.systemd1.Unit", 
+            "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
+        ).await;
+    }
+}
+
+/// creates the vm xml, returning the path to it
+pub fn create_xml(vm_type: LaunchConfig, mouse_id: u32) -> Result<String, SetupError> {
     let xml_path = env::var(match vm_type {
         LaunchConfig::LG => "WINDOWS_LG_XML_PATH",
         LaunchConfig::Spice => "WINDOWS_SPICE_XML_PATH",
         _ => panic!("How did we get here?")
-    }).map_err(|err| SetupError::FailedToGetEnvVar(
-        match vm_type {
-            LaunchConfig::LG => "WINDOWS_LG_XML_PATH",
-            LaunchConfig::Spice => "WINDOWS_SPICE_XML_PATH",
-            _ => ""
-        }.to_string(),
-        err
-    ))?;
+    }).map_err(|err| SetupError::FailedToFindVmXmlVar(err))?;
     let mut xml_string = String::with_capacity(10000);
-    File::open(xml_path).unwrap().read_to_string(&mut xml_string).map_err(|err| SetupError::FailedToReadXmlFile(err))?;
-    return Ok(xml_string);
-}
-
-pub fn write_xml(xml: String) -> Result<(), SetupError>{
+    File::open(xml_path).map_err(|err| SetupError::FailedToOpenVmXmlFile(err))?
+        .read_to_string(&mut xml_string).map_err(|err| SetupError::FailedToReadVmXmlFile(err))?;
+    xml_string = xml_string.replace("VIRTUAL_MOUSE_EVENT_ID", mouse_id.to_string().as_str());
     File::create("/tmp/windows.xml").map_err(|err| SetupError::FailedToCreateTmpXmlFile(err))?
-        .write(xml.as_bytes()).map_err(|err| SetupError::FailedToWriteTmpXmlFile(err))?;
-    Ok(())
+        .write(xml_string.as_bytes()).map_err(|err| SetupError::FailedToWriteTmpXmlFile(err))?;
+    Ok("/tmp/windows.xml".to_string())
 }
 
-pub async fn unload_gpu(dbus_state: &mut DBusState, ss: &mut SystemState) -> Result<(), SetupError> {
-    // Stop display manager
-    println!("Stopping Display Manager");
-    stop_display_manager(dbus_state).await?;
-    ss.dp_stopped = true;
-    // Stop pipewire
-    println!("Stopping pipewire");
-    stop_pipewire().await;
-    ss.pw_stopped = true;
-    // Unload kernel Modules
-    println!("Unloading nvidia Modules");
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    unload_nvidia_modules(ss)?;
-    // Disconnect GPU
-    println!("Disconnecting GPU");
-    disconnect_gpu(ss)?;
-    // Load VFIO drivers
-    println!("Loading VFIO modules");
-    load_vfio_modules()?;
-    ss.vfio_loaded = true;
-    // Restart pipewire service
-    println!("Starting Pipewire");
-    start_pipewire().await;
-    ss.pw_stopped = false;
-    // restart display manager
-    println!("Starting Display Manager");
-    start_display_manager(dbus_state).await?;
-    ss.dp_stopped = false;
-    Ok(())
+/// Launches the vm, returning a handle to the process. process should finish after vm is shutdown
+pub fn launch_vm(path: String) -> Result<JoinHandle<()>, SetupError>{
+    let log_file = File::create("/tmp/windows_vm_log.txt").map_err(|err| SetupError::CouldNotCreateWindowsLogFile(err))?;
+    let log_file2 = File::create("/tmp/windows_vm_err_log.txt").map_err(|err| SetupError::CouldNotCreateWindowsLogFile(err))?;
+    let mut child = tokio::process::Command::new("virsh").args(["-cqemu:///system", "create", &path, "--console"])
+        .stdout(log_file).stderr(log_file2).spawn()
+        .map_err(|err| SetupError::FailedToLaunchVM(err))?;
+    Ok(tokio::spawn(async move {let _ = child.wait().await;}))
 }
-
-pub async fn reattach_gpu(dbus_state: &mut DBusState, ss: &mut SystemState) -> Result<(), SetupError> {
-    // unload vfio
-    println!("Unloading VFIO modules");
-    unload_vfio_modules()?;
-    ss.vfio_loaded = false;
-    // reattach gpu
-    println!("Connecting GPU");
-    connect_gpu(ss)?;
-    // load nvidia
-    println!("Loading Nvidia Modules");
-    load_nvidia_modules(ss)?;
-    // restart pipewire and display manager
-    println!("Restarting Display Manager");
-    restart_display_manager(dbus_state).await?;
-    ss.dp_reset = true;
-    println!("Restarting Pipewire");
-    restart_pipewire().await;
-    ss.pw_reset = true;
-    Ok(())
-}
-
-pub async fn cleanup(mut dbus_state: DBusState, ss: SystemState) {
-    // use system state to undo modifications
-    // undo cpu governor
-    if ss.power_rule_set {
-        if let Ok(read) = Path::new("/sys/devices/system/cpu/").read_dir(){
-            read.into_iter().flatten().filter_map(|dir| {
-                if dir.file_type().unwrap().is_file() || !dir.file_name().to_str().unwrap().starts_with("cpu") {return None;}
-                Some(dir.path().join("cpufreq/scaling_governor"))
-            }).for_each(|cpu_path| {
-                if let Ok(mut file) = File::create(cpu_path) {let _ = file.write("powersave".as_bytes());}
-            });
-        }
-    }
-    // unload vfio if needed
-    if ss.vfio_loaded {
-        let _ = super::call_command("modprobe", ["-r", "vfio-pci"]);
-    }
-    // reconnect gpu
-    if ss.gpu_disconnected.0 {let _ = super::call_command("virsh", ["nodedev-reattach", "pci_0000_01_00_0"]);}
-    if ss.gpu_disconnected.1 {let _ = super::call_command("virsh", ["nodedev-reattach", "pci_0000_01_00_1"]);}
-    // load nvidia if needed
-    if ss.nvidia_unloaded.3 {let _ = super::call_command("modprobe", ["nvidia"]);}
-    if ss.nvidia_unloaded.2 {let _ = super::call_command("modprobe", ["nvidia_modeset"]);}
-    if ss.nvidia_unloaded.1 {let _ = super::call_command("modprobe", ["nvidia_uvm"]);}
-    if ss.nvidia_unloaded.0 {let _ = super::call_command("modprobe", ["nvidia_drm"]);}
-    // actions that require the system bus
-    if dbus_state.check_system_bus().await.is_ok() {
-        // undo cpu limiting
-        if ss.cpus_limited.0 || ss.cpus_limited.1 || ss.cpus_limited.2 {
-            let _ =dbus_state.call_system_method::<_, ()>(
-                "org.freedesktop.systemd1", 
-                "/org/freedesktop/systemd1/unit/user_2eslice", 
-                "org.freedesktop.systemd1.Unit", 
-                "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
-            ).await;
-            let _ =dbus_state.call_system_method::<_, ()>(
-                "org.freedesktop.systemd1", 
-                "/org/freedesktop/systemd1/unit/system_2eslice", 
-                "org.freedesktop.systemd1.Unit", 
-                "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
-            ).await;
-            let _ = dbus_state.call_system_method::<_, ()>(
-                "org.freedesktop.systemd1", 
-                "/org/freedesktop/systemd1/unit/unit_2escope", 
-                "org.freedesktop.systemd1.Unit", 
-                "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
-            ).await;
-        }
-        // restart display manager
-        if !ss.dp_reset {
-            if ss.dp_stopped {
-                let _ = dbus_state.call_system_method::<_, (String,)>(
-                    "org.freedesktop.systemd1", 
-                    "/org/freedesktop/systemd1", 
-                    "org.freedesktop.systemd1.Manager", 
-                    "StartUnit", 
-                    ("display-manager.service", "replace")
-                ).await;
-            }else {
-                let _ = dbus_state.call_system_method::<_, (String,)>(
-                    "org.freedesktop.systemd1", 
-                    "/org/freedesktop/systemd1", 
-                    "org.freedesktop.systemd1.Manager", 
-                    "RestartUnit", 
-                    ("display-manager.service", "replace")
-                ).await;
-            }
-        }
-        // restart pipewire
-        if !ss.pw_reset{
-            if ss.pw_stopped {
-                start_pipewire().await;
-            }else{
-                restart_pipewire().await;
-            }
-        }
-    }
-}
-
-pub async fn performance_enhancements(dbus_state: &mut DBusState, ss: &mut SystemState) -> Result<(), SetupError> {
-    dbus_state.call_system_method::<(bool, Vec<(&str, Variant<Vec<u8>>)>), ()>(
-        "org.freedesktop.systemd1", 
-        "/org/freedesktop/systemd1/unit/user_2eslice", 
-        "org.freedesktop.systemd1.Unit", 
-        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
-    ).await.map_err(|err| SetupError::BusError(err))?;
-    ss.cpus_limited.0 = true;
-    dbus_state.call_system_method::<(bool, Vec<(&str, Variant<Vec<u8>>)>), ()>(
-        "org.freedesktop.systemd1", 
-        "/org/freedesktop/systemd1/unit/system_2eslice", 
-        "org.freedesktop.systemd1.Unit", 
-        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
-    ).await.map_err(|err| SetupError::BusError(err))?;
-    ss.cpus_limited.1 = true;
-    dbus_state.call_system_method::<(bool, Vec<(&str, Variant<Vec<u8>>)>), ()>(
-        "org.freedesktop.systemd1", 
-        "/org/freedesktop/systemd1/unit/unit_2escope", 
-        "org.freedesktop.systemd1.Unit", 
-        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![0_u8, 240_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
-    ).await.map_err(|err| SetupError::BusError(err))?;
-    ss.cpus_limited.2 = true;
-    Path::new("/sys/devices/system/cpu/").read_dir().map_err(|err| SetupError::FailedToReadCPUDir(err))?
-        .into_iter().flatten().filter_map(|dir| {
-            if dir.file_type().unwrap().is_file() || !dir.file_name().to_str().unwrap().starts_with("cpu") {return None;}
-            Some(dir.path().join("cpufreq/scaling_governor"))
-        }).for_each(|cpu_path| {
-            if let Ok(mut file) = File::create(cpu_path) {let _ = file.write("performance".as_bytes());}
-        });
-    ss.power_rule_set = true;
-    Ok(())
-}
-
-pub async fn undo_performance_enhancements(dbus_state: &mut DBusState, ss: &mut SystemState) -> Result<(), SetupError> {
-    dbus_state.call_system_method::<_, ()>(
-        "org.freedesktop.systemd1", 
-        "/org/freedesktop/systemd1/unit/user_2eslice", 
-        "org.freedesktop.systemd1.Unit", 
-        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
-    ).await.map_err(|err| SetupError::BusError(err))?;
-    ss.cpus_limited.0 = false;
-    dbus_state.call_system_method::<_, ()>(
-        "org.freedesktop.systemd1", 
-        "/org/freedesktop/systemd1/unit/system_2eslice", 
-        "org.freedesktop.systemd1.Unit", 
-        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
-    ).await.map_err(|err| SetupError::BusError(err))?;
-    ss.cpus_limited.1 = false;
-    dbus_state.call_system_method::<_, ()>(
-        "org.freedesktop.systemd1", 
-        "/org/freedesktop/systemd1/unit/unit_2escope", 
-        "org.freedesktop.systemd1.Unit", 
-        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
-    ).await.map_err(|err| SetupError::BusError(err))?;
-    ss.cpus_limited.2 = false;
-    Path::new("/sys/devices/system/cpu/").read_dir().map_err(|err| SetupError::FailedToReadCPUDir(err))?
-        .into_iter().flatten().filter_map(|dir| {
-            if dir.file_type().unwrap().is_file() || !dir.file_name().to_str().unwrap().starts_with("cpu") {return None;}
-            Some(dir.path().join("cpufreq/scaling_governor"))
-        }).for_each(|cpu_path| {
-            if let Ok(mut file) = File::create(cpu_path) {let _ = file.write("powersave".as_bytes());}
-        });
-    ss.power_rule_set = false;
-    Ok(())
-}
-
-pub async fn stop_display_manager(dbus_state: &mut DBusState) -> Result<(), SetupError> {
-    dbus_state.call_system_method::<_, (dbus::Path,)>(
-        "org.freedesktop.systemd1", 
-        "/org/freedesktop/systemd1", 
-        "org.freedesktop.systemd1.Manager", 
-        "StopUnit", 
-        ("display-manager.service", "replace")
-    ).await.map(|_| ()).map_err(|err| SetupError::BusError(err))
-}
-
-pub async fn start_display_manager(dbus_state: &mut DBusState) -> Result<(), SetupError> {
-    dbus_state.call_system_method::<_, (dbus::Path,)>(
-        "org.freedesktop.systemd1", 
-        "/org/freedesktop/systemd1", 
-        "org.freedesktop.systemd1.Manager", 
-        "StartUnit", 
-        ("display-manager.service", "replace")
-    ).await.map(|_| ()).map_err(|err| SetupError::BusError(err))
-}
-
-pub async fn restart_display_manager(dbus_state: &mut DBusState) -> Result<(), SetupError> {
-    dbus_state.call_system_method::<_, (dbus::Path,)>(
-        "org.freedesktop.systemd1", 
-        "/org/freedesktop/systemd1", 
-        "org.freedesktop.systemd1.Manager", 
-        "RestartUnit", 
-        ("display-manager.service", "replace")
-    ).await.map(|_|()).map_err(|err| SetupError::BusError(err))
-}
-
-pub async fn stop_pipewire() {
-    Path::new("/run/user").read_dir().unwrap().flatten().for_each(|user| {
-        let name = user.file_name().into_string().unwrap();
-        let output = super::call_command("systemctl", ["--user", ("--machine=".to_string() + name.as_str() + "@.host").as_str(), "stop", "pipewire.socket"]);
-        if let Ok(out) = output{
-            if out.status.success() {
-                println!("Successfully stopped user {}'s pipewire socket!", name);
-            }
-        }
-    });
-}
-
-pub async fn start_pipewire() {
-    Path::new("/run/user").read_dir().unwrap().flatten().for_each(|user| {
-        let name = user.file_name().into_string().unwrap();
-        let output = super::call_command("systemctl", ["--user", ("--machine=".to_string() + name.as_str() + "@.host").as_str(), "stop", "pipewire.socket"]);
-        if let Ok(out) = output{
-            if out.status.success() {
-                println!("Successfully started user {}'s pipewire socket!", name);
-            }
-        }
-    });
-}
-
-pub async fn restart_pipewire() {
-    Path::new("/run/user").read_dir().unwrap().flatten().for_each(|user| {
-        let name = user.file_name().into_string().unwrap();
-        let output = super::call_command("systemctl", ["--user", ("--machine=".to_string() + name.as_str() + "@.host").as_str(), "stop", "pipewire.socket"]);
-        if let Ok(out) = output{
-            if out.status.success() {
-                println!("Successfully restarted user {}'s pipewire socket!", name);
-            }
-        }
-    });
-}
-
-pub fn unload_nvidia_modules(ss: &mut SystemState) -> Result<(), SetupError> {
-    let out = super::call_command("modprobe", ["-f", "-r", "nvidia_uvm"])
-        .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia_uvm".to_string(), err))?;
-    if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
-        return Err(SetupError::ModProbeUnloadFailed("nvidia_uvm".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
-    }
-    println!("Unloading nvidia_uvm with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
-    ss.nvidia_unloaded.0 = true;
-    let out = super::call_command("modprobe", ["-f", "-r", "nvidia_drm"])
-        .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia_drm".to_string(), err))?;
-    println!("Unloading nvidia_drm with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout.clone()).unwrap(), String::from_utf8(out.stderr.clone()).unwrap());
-    if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
-        return Err(SetupError::ModProbeUnloadFailed("nvidia_drm".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
-    }
-    ss.nvidia_unloaded.1 = true;
-    let out = super::call_command("modprobe", ["-f", "-r", "nvidia_modeset"])
-        .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia_modeset".to_string(), err))?;
-    if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
-        return Err(SetupError::ModProbeUnloadFailed("nvidia_modeset".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
-    }
-    println!("Unloading nvidia_modeset with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
-    ss.nvidia_unloaded.2 = true;
-    let out = super::call_command("modprobe", ["-f", "-r", "nvidia"])
-        .map_err(|err| SetupError::FailedToUnloadKernelModule("nvidia".to_string(), err))?;
-    if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
-        return Err(SetupError::ModProbeUnloadFailed("nvidia".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
-    }
-    println!("Unloading nvidia with status {}, out {}, and err {}", out.status.to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
-    ss.nvidia_unloaded.3 = true;
-    Ok(())
-}
-
-pub fn load_nvidia_modules(ss: &mut SystemState) -> Result<(), SetupError> {
-    super::call_command("modprobe", ["nvidia"])
-        .map_err(|err| SetupError::FailedToLoadKernelModule("nvidia".to_string(), err))?;
-    ss.nvidia_unloaded.3 = false;
-    super::call_command("modprobe", ["nvidia_modeset"])
-        .map_err(|err| SetupError::FailedToLoadKernelModule("nvidia_modeset".to_string(), err))?;
-    ss.nvidia_unloaded.2 = false;
-    super::call_command("modprobe", ["nvidia_drm"])
-        .map_err(|err| SetupError::FailedToLoadKernelModule("nvidia_drm".to_string(), err))?;
-    ss.nvidia_unloaded.1 = false;
-    super::call_command("modprobe", ["nvidia_uvm"])
-        .map_err(|err| SetupError::FailedToLoadKernelModule("nvidia_uvm".to_string(), err))?;
-    ss.nvidia_unloaded.0 = false;
-    Ok(())
-}
-
-pub fn disconnect_gpu(ss: &mut SystemState) -> Result<(), SetupError> {
-    // Disconnect nvidia gpu
-    println!("detach 1: {:?}", super::call_command("virsh", ["nodedev-detach", "pci_0000_01_00_0"])
-        .map_err(|err| SetupError::FailedToDetachGPU("pci_0000_01_00_0".to_string(), err))?);
-    ss.gpu_disconnected.0 = true;
-    println!("detach 2: {:?}", super::call_command("virsh", ["nodedev-detach", "pci_0000_01_00_1"])
-        .map_err(|err| SetupError::FailedToDetachGPU("pci_0000_01_00_1".to_string(), err))?);
-    ss.gpu_disconnected.1 = true;
-    Ok(())
-}
-
-pub fn connect_gpu(ss: &mut SystemState) -> Result<(), SetupError> {
-    // connect nvidia gpu
-    super::call_command("virsh", ["nodedev-reattach", "pci_0000_01_00_0"])
-        .map_err(|err| SetupError::FailedToAttachGPU("pci_0000_01_00_0".to_string(), err))?;
-    ss.gpu_disconnected.0 = false;
-    super::call_command("virsh", ["nodedev-reattach", "pci_0000_01_00_1"])
-        .map_err(|err| SetupError::FailedToAttachGPU("pci_0000_01_00_1".to_string(), err))?;
-    ss.gpu_disconnected.1 = false;
-    Ok(())
-}
-
-pub fn load_vfio_modules() -> Result<(), SetupError>{
-    super::call_command("modprobe", ["vfio-pci"])
-        .map_err(|err| SetupError::FailedToLoadKernelModule("vfio-pci".to_string(), err)).map(|_| ())
-}
-
-pub fn unload_vfio_modules() -> Result<(), SetupError>{
-    let out = super::call_command("modprobe", ["-f", "-r", "vfio-pci"])
-        .map_err(|err| SetupError::FailedToUnloadKernelModule("vfio-pci".to_string(), err))?;
-    if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
-        return Err(SetupError::ModProbeUnloadFailed("vfio-pci".to_string(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap()))
-    }
-    Ok(())
-}
-

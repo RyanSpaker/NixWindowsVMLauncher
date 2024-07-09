@@ -8,9 +8,7 @@ nix = {version = "0.29.0", features = ["user"]}
 tokio = { version = "1.38.0", features = ["full"] }
 dbus = "0.9.7"
 dbus-tokio = "0.7.6"
-likemod = { version =  "0.2.0", features = ["async"] }
 users = "0.11.0"
-dbus-crossroads = "0.5.2"
 futures = "0.3.30"
 input = "0.9.0"
 evdev = { version = "0.12.1", features = ["tokio"]}

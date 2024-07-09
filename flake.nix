@@ -24,6 +24,7 @@
               "rustc"
               "rustfmt"
             ])
+            linux-pam
             pkg-config
             cargo-udeps
             git
@@ -64,9 +65,7 @@
           libraries = pkgs.lib.makeLibraryPath [pkgs.libinput pkgs.dbus];
           postInstall = ''
             mv $out/bin/nixos-windows-launcher $out/bin/.nixos-windows-launcher
-            makeWrapper $out/bin/.nixos-windows-launcher $out/bin/nixos-windows-launcher --set LD_LIBRARY_PATH ${libraries} --set PATH ${pkgs.lib.makeBinPath (with pkgs; [ kmod libvirt systemd xorg.xinput looking-glass-client ])}
-            mkdir -p $out/share/dbus-1/system.d
-            cp ${src}/dbus.conf $out/share/dbus-1/system.d/org.cowsociety.vmlauncher.conf
+            makeWrapper $out/bin/.nixos-windows-launcher $out/bin/nixos-windows-launcher --set LD_LIBRARY_PATH ${libraries} --set PATH ${pkgs.lib.makeBinPath (with pkgs; [ kmod libvirt xorg.xinput looking-glass-client virt-viewer ])}
           '';
         };
       }
