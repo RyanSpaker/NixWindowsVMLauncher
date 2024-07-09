@@ -83,7 +83,7 @@ impl Sessions{
                         system_conn.clone()
                     );
                     let d = match proxy.get::<String>("org.freedesktop.login1.Session", "Display").await{
-                        Ok(display) => {display},
+                        Ok(display) => { if display == "" {continue;} display},
                         Err(err) => {println!("Failed to get display from {}, with err {}", path, err); continue;}
                     };
                     let u = match proxy.get::<(u32,dbus::Path)>("org.freedesktop.login1.Session", "User").await{

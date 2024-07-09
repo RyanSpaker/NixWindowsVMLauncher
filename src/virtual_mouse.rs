@@ -68,7 +68,6 @@ impl ToString for MouseError{
 /// state of the mouse manager held by the main app
 #[derive(Default)]
 pub struct MouseState{
-    pub handle: Option<JoinHandle<Result<(), MouseError>>>,
     pub session_handle: Option<JoinHandle<()>>,
     pub input_id: u32
 }

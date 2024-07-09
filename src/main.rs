@@ -34,7 +34,8 @@ pub enum AppError{
     FailedToSetupMouseSessionHandler(MouseError),
     FailedToCreateXml(SetupError),
     FailedToLaunchVm(SetupError),
-    FailedToCreateViewAppHandler(SessionError)
+    FailedToCreateViewAppHandler(SessionError),
+    MouseUpdateFailed(MouseError)
 }
 impl std::fmt::Display for AppError{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -48,7 +49,8 @@ impl std::fmt::Display for AppError{
             AppError::FailedToSetupMouseSessionHandler(err) => format!("Could not setup mouse session handler: {}", err.to_string()),
             AppError::FailedToCreateXml(err) => format!("Could not create vm xml file: {}", err.to_string()),
             AppError::FailedToLaunchVm(err) => format!("Could not launch the vm: {}", err.to_string()),
-            AppError::FailedToCreateViewAppHandler(err) => format!("Creating handler for launching vm viewer failed: {}", err.to_string())
+            AppError::FailedToCreateViewAppHandler(err) => format!("Creating handler for launching vm viewer failed: {}", err.to_string()),
+            AppError::MouseUpdateFailed(err) => format!("Mouse update loop failed with err: {}", err.to_string())
         };
         f.write_str(string.as_str())
     }
@@ -130,7 +132,15 @@ async fn root_app(ss: &mut SystemState, vm_type: LaunchConfig, mouse_path: Strin
     println!("Setting up mouse session handler");
     ss.mouse.session_handle = Some(mouse_manager.setup_session_handler(ss).await.map_err(|err| AppError::FailedToSetupMouseSessionHandler(err))?);
     println!("Spawning mouse update loop");
-    ss.mouse.handle = Some(mouse_manager.spawn_update_loop());
+    let mouse_future = mouse_manager.update_loop();
+    let program_future = post_mouse_root(vm_type, output_id, ss);
+    tokio::select! {
+        result = mouse_future => {return result.map_err(|err| AppError::MouseUpdateFailed(err));}
+        result = program_future => {return result;}
+    }
+}
+/// rest of the root app, needs its own future so that it can run in parallel with the non send mouse update code
+pub async fn post_mouse_root(vm_type: LaunchConfig, output_id: u32, ss: &mut SystemState) -> Result<(), AppError>{ 
     // finish xml
     println!("Finishing and writing vm xml");
     let xml_path = create_xml(vm_type.clone(), output_id).map_err(|err| AppError::FailedToCreateXml(err))?;
@@ -152,7 +162,6 @@ async fn cleanup(mut ss: SystemState){
     revert_performance_enhancements(&mut ss).await;
     // kill session handlers
     println!("Ending Session Handlers");
-    if let Some(handle) = ss.mouse.handle.as_mut() {handle.abort();}
     if let Some(handle) = ss.mouse.session_handle.as_mut() {handle.abort();}
     if let Some(handle) = ss.session.viewer_hadle.as_mut() {handle.abort();}
     if let Some(handle) = ss.session.session_handle.as_mut() {handle.abort();}
