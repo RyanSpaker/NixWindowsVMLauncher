@@ -59,7 +59,9 @@ impl Sessions{
             .map_err(|err| SessionError::FailedToGetCurrentSessions(err))?;
         let mut guard = ss.session.new_sessions.lock().map_err(|err| SessionError::FailedToGetSessionListLock(err.to_string()))?;
         for (_, _, _, _, path) in sessions.into_iter(){
-            if !guard.contains(&path.to_string()) {guard.push(path.to_string());}
+            if !guard.contains(&path.to_string()) {
+                guard.push(path.to_string());
+            }
         }
         // spawn handler for new sessions list
         let displays = ss.session.displays.clone();
@@ -70,6 +72,7 @@ impl Sessions{
         let handle = tokio::spawn(async move {
             loop{
                 let new_sessions = NewSessionFuture{sessions: sessions.clone(), waker: waker.clone()}.await;
+                println!("Found New Sessions at: {:?}", new_sessions);
                 // find the display values
                 let mut new_displays = vec![];
                 for path in new_sessions.into_iter(){
@@ -89,6 +92,7 @@ impl Sessions{
                     };
                     new_displays.push((u, d));
                 }
+                println!("Found new Displays: {:?}", new_displays);
                 // add display values
                 if let Ok(mut d) = displays.clone().lock() {
                     d.extend(new_displays.into_iter());
