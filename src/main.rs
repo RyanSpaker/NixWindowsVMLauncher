@@ -35,7 +35,8 @@ pub enum AppError{
     FailedToCreateXml(SetupError),
     FailedToLaunchVm(SetupError),
     FailedToCreateViewAppHandler(SessionError),
-    MouseUpdateFailed(MouseError)
+    MouseUpdateFailed(MouseError),
+    FailedToStartDP(GpuSetupError)
 }
 impl std::fmt::Display for AppError{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -50,7 +51,8 @@ impl std::fmt::Display for AppError{
             AppError::FailedToCreateXml(err) => format!("Could not create vm xml file: {}", err.to_string()),
             AppError::FailedToLaunchVm(err) => format!("Could not launch the vm: {}", err.to_string()),
             AppError::FailedToCreateViewAppHandler(err) => format!("Creating handler for launching vm viewer failed: {}", err.to_string()),
-            AppError::MouseUpdateFailed(err) => format!("Mouse update loop failed with err: {}", err.to_string())
+            AppError::MouseUpdateFailed(err) => format!("Mouse update loop failed with err: {}", err.to_string()),
+            AppError::FailedToStartDP(err) => format!("Starting the Display Manager Failed: {}", err.to_string())
         };
         f.write_str(string.as_str())
     }
@@ -117,6 +119,7 @@ async fn root_app(ss: &mut SystemState, vm_type: LaunchConfig, mouse_path: Strin
     Sessions::create_session_handler(ss).await.map_err(|err| AppError::FailedToCreateSessionHandler(err))?;
     // wait for login if requires
     if vm_type.requires_gpu_dc() {
+        system_setup::gpu::start_dp(ss).await.map_err(|err| AppError::FailedToStartDP(err))?;
         println!("Waiting for session");
         session::AnyDisplayFuture::new(&mut ss.session).await;
     }

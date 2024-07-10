@@ -71,6 +71,7 @@ impl Sessions{
         let system_conn = ss.dbus.system_conn.clone();
         let handle = tokio::spawn(async move {
             loop{
+                println!("Waiting for new Sessions");
                 let new_sessions = NewSessionFuture{sessions: sessions.clone(), waker: waker.clone()}.await;
                 println!("Found New Sessions at: {:?}", new_sessions);
                 // find the display values
@@ -94,7 +95,7 @@ impl Sessions{
                         Ok(class) => {class},
                         Err(err) => {println!("Failed to get class from {}, with err {}", path, err); continue;}
                     };
-                    if c == "greeter" {continue;}
+                    if c == "greeter" {println!("Session rejected for being greeter"); continue;}
                     let n = match proxy.get::<String>("org.freedesktop.login1.Session", "Name").await{
                         Ok(name) => {name},
                         Err(err) => {println!("Failed to get name from {}, with err {}", path, err); continue;}
@@ -147,6 +148,7 @@ impl Sessions{
                     handle.abort();
                 }
                 // add display values
+                if new_displays.len() == 0 {continue;}
                 if let Ok(mut d) = displays.clone().lock() {
                     d.extend(new_displays.into_iter());
                 }else {continue;}

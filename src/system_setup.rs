@@ -191,6 +191,9 @@ pub mod gpu {
             ("pipewire-pulse.socket", "replace")
         ).await.map_err(|err| GpuSetupError::FailedToStartPWP(err))?;
         ss.gpu_state.pwp_state = ServiceState::Started;
+        Ok(())
+    }
+    pub async fn start_dp(ss: &mut SystemState) -> Result<(), GpuSetupError> {
         // restart display manager
         println!("Starting Display Manager");
         let _: (Path,) = ss.dbus.call_system_method(
