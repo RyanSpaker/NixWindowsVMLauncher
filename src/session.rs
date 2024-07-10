@@ -103,17 +103,22 @@ impl Sessions{
                     // connect to user bus
                     let proxy = dbus::nonblock::Proxy::new(
                         "org.freedesktop.login1", 
-                        user_path,
+                        user_path.to_owned(),
                         std::time::Duration::from_secs(2), 
                         system_conn.clone()
                     );
-                    let runtime_path = if let Ok(path) = proxy.get::<String>("org.freedesktop.login1.User", "RuntimePath").await {path} 
-                        else {continue;};
+                    let runtime_path = match proxy.get::<String>("org.freedesktop.login1.User", "RuntimePath").await {
+                        Ok(path) => {path},
+                        Err(err) => {println!("Failed to get runtime from {}, with err {}", user_path, err); continue;}
+                    };
                     let addr = "unix:path=".to_string() + runtime_path.as_str() + "/bus";
-                    let channel = match DBusConnection::open_channel(u, &addr) {Ok(result) => result, _ => {continue;}};
+                    let channel = match DBusConnection::open_channel(u, &addr) {
+                        Ok(result) => result, 
+                        Err(err) => {println!("Failed to open channel from {}, with err {}", addr, err.to_string()); continue;}
+                    };
                     let (resource, conn) = match dbus_tokio::connection::from_channel::<dbus::nonblock::SyncConnection>(channel) {
                         Ok(result) => {result},
-                        _ => {continue;}
+                        Err(err) => {println!("Failed to connect to user dbus for {}, with err {}", user_path, err); continue;}
                     };
                     let handle = tokio::spawn(resource);
                     // query systemd1 for environment
@@ -125,10 +130,10 @@ impl Sessions{
                     );
                     let env_vars = match proxy.get::<Vec<String>>("org.freedesktop.systemd1.Manager", "Environment").await {
                         Ok(result) => result,
-                        _ => {handle.abort(); continue;}
+                        Err(err) => {println!("Failed to get environment from user systemd {}, with err {}", user_path, err); handle.abort(); continue;}
                     };
                     // find xauth path from env
-                    for var in env_vars.into_iter() {
+                    for var in env_vars.iter() {
                         if var.starts_with("XAUTHORITY="){
                             let xauth_path = var.strip_prefix("XAUTHORITY=").unwrap();
                             println!("Found new Display: {} {} {} {} {}", u, n, c, d, xauth_path);
@@ -136,6 +141,7 @@ impl Sessions{
                             break;
                         }
                     }
+                    println!("Failed to find XAUTHORITY in {:?}", env_vars);
                     handle.abort();
                 }
                 // add display values
