@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs::{File, OpenOptions}, num::ParseIntError, os::{fd::OwnedFd, unix::fs::OpenOptionsExt}, path::Path, string::FromUtf8Error};
+use std::{collections::HashSet, ffi::OsStr, fs::{File, OpenOptions}, num::ParseIntError, os::{fd::OwnedFd, unix::fs::OpenOptionsExt}, path::Path, process::{Output, Stdio}};
 use evdev::{uinput::{VirtualDevice, VirtualDeviceBuilder}, AttributeSet, Device, EventStream, EventType, InputEvent, Key, RelativeAxisType};
 use input::{event::{pointer::{ButtonState, PointerScrollEvent}, PointerEvent}, Event, Libinput, LibinputInterface};
 use nix::libc::{O_RDONLY, O_RDWR, O_WRONLY};
@@ -26,7 +26,6 @@ pub enum MouseError{
     FailedToDispatchLibinput(std::io::Error),
     FailedToEmitMouseEvents(std::io::Error),
     FailedToCallXInputList(std::io::Error),
-    FailedToConvertOutputToString(FromUtf8Error),
     FailedToFindMouseIDFromXInput(String, String),
     FailedToToggleMouse(std::io::Error),
     FailedToAddSignalMatchToSystemBus(dbus::Error),
@@ -54,7 +53,6 @@ impl ToString for MouseError{
             MouseError::FailedToDispatchLibinput(err) => format!("Could not dispath libinput context: {}", *err),
             MouseError::FailedToEmitMouseEvents(err) => format!("Could not emit mouse events on virtual device: {}", *err),
             MouseError::FailedToCallXInputList(err) => format!("Call to xinput list failed: {}", *err),
-            MouseError::FailedToConvertOutputToString(err) => format!("Could not convert xinput list output to string: {}", *err),
             MouseError::FailedToFindMouseIDFromXInput(output, err) => format!("Finding mouse id from xinput list failed with output: {} and err: {}", *output, *err),
             MouseError::FailedToToggleMouse(err) => format!("Toggling mouse with xinput --enable/disable failed: {}", *err),
             MouseError::FailedToAddSignalMatchToSystemBus(err) => format!("Could not add signal match for SessionNew on the system bus: {}", *err),
@@ -159,16 +157,15 @@ impl MouseManager{
     }
     /// creates a callback for new sessions which disables the original mouse
     pub async fn setup_session_handler(&mut self, ss: &mut SystemState) -> Result<JoinHandle<()>, MouseError>{
-        let mut known_displays: HashSet<(u32, String)> = HashSet::new();
+        let mut known_displays: HashSet<(u32, String, String)> = HashSet::new();
         let displays = ss.session.displays.clone();
         let wakers = ss.session.display_waker.clone();
         let input_id = self.input_id;
         let handle = tokio::spawn(async move {
             loop{
-                let new_displays = session::NewDisplayFuture::new(known_displays.clone(), displays.clone(), wakers.clone()).await;
-                for (_, display) in new_displays.iter(){
-                    std::env::set_var("DISPLAY", display.to_owned());
-                    match toggle_mouse(input_id, false){
+                let new_displays: HashSet<(u32, String, String)> = session::NewDisplayFuture::new(known_displays.clone(), displays.clone(), wakers.clone()).await;
+                for (_, display, xauth) in new_displays.iter(){
+                    match toggle_mouse(display.to_owned(), xauth.to_owned(), input_id, false).await{
                         Ok(id) => {println!("Disabled mouse {}, libinput {}, successfully", input_id, id)},
                         Err(err) => {println!("Failed to disable mouse {}, on display {}, with err {}", input_id, display, err.to_string());}
                     }
@@ -181,9 +178,9 @@ impl MouseManager{
     /// enables the input mouse on all current sessions.
     pub async fn reset_sessions(ss: &mut SystemState) {
         if let Ok(display) = ss.session.displays.lock() {
-            for (_, display) in display.iter(){
+            for (_, display, xauth) in display.iter(){
                 std::env::set_var("DISPLAY", display.to_owned());
-                let _ = toggle_mouse(ss.mouse.input_id, true);
+                let _ = toggle_mouse(display.to_owned(), xauth.to_owned(), ss.mouse.input_id, true).await;
             }
         }
     }
@@ -297,19 +294,26 @@ impl MouseMovement{
     }
 }
 
+pub async fn call_command<I, S, J, N, M>(command: &str, args: I, envs: J) -> std::io::Result<Output>
+where I: IntoIterator<Item = S>, S: AsRef<OsStr>, J: IntoIterator<Item = (N,M)>, N: AsRef<OsStr>, M: AsRef<OsStr> {
+    tokio::process::Command::new(command).args(args).envs(envs).stderr(Stdio::piped()).stdout(Stdio::piped()).output().await
+}
+
 // Helper function to take an input id and use xinput to disable/enable the corresponding mouse
-pub fn toggle_mouse(input_id: u32, enable: bool) -> Result<u32, MouseError> {
+pub async fn toggle_mouse(display: String, xauth_path: String, input_id: u32, enable: bool) -> Result<u32, MouseError> {
+    let envs = [("DISPLAY", display),("XAUTHORITY", xauth_path)];
     let event_string = "event".to_owned() + &input_id.to_string();
-    let output = std::process::Command::new("xinput").args(["list", "--id-only"]).output()
+    let output = call_command("xinput", ["list", "--id-only"], envs.clone()).await
         .map_err(|err| MouseError::FailedToCallXInputList(err))?;
-    let output_text = String::from_utf8(output.stdout).map_err(|err| MouseError::FailedToConvertOutputToString(err))?;
-    let ids = output_text.split("\n").filter_map(|id| id.parse::<u32>().ok()).collect::<Vec<u32>>();
-    let id = ids.iter().find(|id| {
-        std::process::Command::new("xinput").args(["list-props", (**id).to_string().as_str()]).output()
-            .ok().map(|output| String::from_utf8(output.stdout).ok()).flatten().is_some_and(|props| props.contains(event_string.as_str()))
-    }).ok_or(MouseError::FailedToFindMouseIDFromXInput(output_text, String::from_utf8_lossy(&output.stderr).to_string()))?;
-    std::process::Command::new("xinput").args([(if enable {"--enable"} else {"--disable"}).to_string(), id.to_string()]).output()
-        .map_err(|err| MouseError::FailedToToggleMouse(err))?;
-    if enable {println!("Enabled mouse {}", id);} else {println!("Disabled mouse {}", id);}
-    Ok(*id)
+    let ids: Vec<u32> = String::from_utf8_lossy(&output.stdout).split("\n").filter_map(|id| id.parse::<u32>().ok()).collect();
+    for id in ids.into_iter() {
+        if let Ok(output) = call_command("xinput", ["list-props", &id.to_string()], envs.clone()).await{
+            if String::from_utf8_lossy(&output.stdout).contains(&event_string) {
+                call_command("xinput", [(if enable {"--enable"} else {"--disable"}).to_string(), id.to_string()], envs).await
+                    .map_err(|err| MouseError::FailedToToggleMouse(err))?;
+                return Ok(id);
+            }
+        }
+    }
+    Err(MouseError::FailedToFindMouseIDFromXInput(String::from_utf8_lossy(&output.stdout).to_string(), String::from_utf8_lossy(&output.stderr).to_string()))
 }

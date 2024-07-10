@@ -3,7 +3,7 @@ use tokio::task::JoinHandle;
 use dbus::{message::MatchRule, nonblock::{stdintf::org_freedesktop_dbus::Properties, MsgMatch}};
 use futures::Future;
 
-use crate::{LaunchConfig, SystemState};
+use crate::{dbus_manager::DBusConnection, LaunchConfig, SystemState};
 
 #[derive(Debug)]
 pub enum SessionError{
@@ -23,7 +23,7 @@ impl ToString for SessionError{
 
 #[derive(Default)]
 pub struct Sessions{
-    pub displays: Arc<Mutex<HashSet<(u32, String)>>>,
+    pub displays: Arc<Mutex<HashSet<(u32, String, String)>>>,
     pub new_sessions: Arc<Mutex<Vec<String>>>,
     pub display_waker: Arc<Mutex<Vec<Waker>>>,
     signal_handle: Option<MsgMatch>,
@@ -86,8 +86,8 @@ impl Sessions{
                         Ok(display) => { if display == "" {continue;} display},
                         Err(err) => {println!("Failed to get display from {}, with err {}", path, err); continue;}
                     };
-                    let u = match proxy.get::<(u32,dbus::Path)>("org.freedesktop.login1.Session", "User").await{
-                        Ok((user, _)) => {user},
+                    let (u, user_path) = match proxy.get::<(u32,dbus::Path)>("org.freedesktop.login1.Session", "User").await{
+                        Ok(result) => {result},
                         Err(err) => {println!("Failed to get user from {}, with err {}", path, err); continue;}
                     };
                     let c = match proxy.get::<String>("org.freedesktop.login1.Session", "Class").await{
@@ -99,8 +99,44 @@ impl Sessions{
                         Ok(name) => {name},
                         Err(err) => {println!("Failed to get name from {}, with err {}", path, err); continue;}
                     };
-                    println!("Found new Display: {} {} {} {}", u, n, c, d);
-                    new_displays.push((u, d));
+                    // find xauth path
+                    // connect to user bus
+                    let proxy = dbus::nonblock::Proxy::new(
+                        "org.freedesktop.login1", 
+                        user_path,
+                        std::time::Duration::from_secs(2), 
+                        system_conn.clone()
+                    );
+                    let runtime_path = if let Ok(path) = proxy.get::<String>("org.freedesktop.login1.User", "RuntimePath").await {path} 
+                        else {continue;};
+                    let addr = "unix:path=".to_string() + runtime_path.as_str() + "/bus";
+                    let channel = match DBusConnection::open_channel(u, &addr) {Ok(result) => result, _ => {continue;}};
+                    let (resource, conn) = match dbus_tokio::connection::from_channel::<dbus::nonblock::SyncConnection>(channel) {
+                        Ok(result) => {result},
+                        _ => {continue;}
+                    };
+                    let handle = tokio::spawn(resource);
+                    // query systemd1 for environment
+                    let proxy = dbus::nonblock::Proxy::new(
+                        "org.freedesktop.systemd1", 
+                        "/org/freedesktop/systemd1",
+                        std::time::Duration::from_secs(2), 
+                        conn.clone()
+                    );
+                    let env_vars = match proxy.get::<Vec<String>>("org.freedesktop.systemd1.Manager", "Environment").await {
+                        Ok(result) => result,
+                        _ => {handle.abort(); continue;}
+                    };
+                    // find xauth path from env
+                    for var in env_vars.into_iter() {
+                        if var.starts_with("XAUTHORITY="){
+                            let xauth_path = var.strip_prefix("XAUTHORITY=").unwrap();
+                            println!("Found new Display: {} {} {} {} {}", u, n, c, d, xauth_path);
+                            new_displays.push((u, d, xauth_path.to_string()));
+                            break;
+                        }
+                    }
+                    handle.abort();
                 }
                 // add display values
                 if let Ok(mut d) = displays.clone().lock() {
@@ -116,14 +152,14 @@ impl Sessions{
         Ok(())
     }
     pub async fn create_viewer_session_handler(vm_type: LaunchConfig, ss: &mut SystemState) -> Result<(), SessionError> {
-        let mut known_displays: HashSet<(u32, String)> = HashSet::new();
+        let mut known_displays: HashSet<(u32, String, String)> = HashSet::new();
         let displays = ss.session.displays.clone();
         let wakers = ss.session.display_waker.clone();
         let handle = tokio::spawn(async move {
             let mut processes = vec![];
             loop{
                 let new_displays = NewDisplayFuture::new(known_displays.clone(), displays.clone(), wakers.clone()).await;
-                for (uid, display) in new_displays.iter(){
+                for (uid, display, xauth) in new_displays.iter(){
                     let _ = users::switch::set_effective_uid(*uid);
                     let child = match vm_type {
                         LaunchConfig::LG => {
@@ -132,7 +168,7 @@ impl Sessions{
                             } else {(Stdio::null(), Stdio::null())};
                             tokio::process::Command::new("looking-glass-client")
                                 .args(["-T", "-s", "input:captureOnFocus"])
-                                .env("DISPLAY", display)
+                                .envs([("DISPLAY", display), ("XAUTHORITY", xauth)])
                                 .uid(*uid)
                                 .stdout(log).stderr(err_log).spawn()
                         },
@@ -142,7 +178,7 @@ impl Sessions{
                             } else {(Stdio::null(), Stdio::null())};
                             tokio::process::Command::new("virt-viewer")
                                 .args(["--connect", "qemu:///system", "windows"])
-                                .env("DISPLAY", display)
+                                .envs([("DISPLAY", display), ("XAUTHORITY", xauth)])
                                 .uid(*uid)
                                 .stdout(log).stderr(err_log).spawn()
                         },
@@ -160,7 +196,7 @@ impl Sessions{
 
 /// future which waits for at least 1 display to be created
 pub struct AnyDisplayFuture{
-    displays: Arc<Mutex<HashSet<(u32, String)>>>,
+    displays: Arc<Mutex<HashSet<(u32, String, String)>>>,
     waker: Arc<Mutex<Vec<Waker>>>
 }
 impl AnyDisplayFuture{
@@ -187,21 +223,21 @@ impl Future for AnyDisplayFuture{
 
 /// future which waits for a new display to be added
 pub struct NewDisplayFuture{
-    known_displays: HashSet<(u32, String)>,
-    displays: Arc<Mutex<HashSet<(u32, String)>>>,
+    known_displays: HashSet<(u32, String, String)>,
+    displays: Arc<Mutex<HashSet<(u32, String, String)>>>,
     waker: Arc<Mutex<Vec<Waker>>>
 }
 impl NewDisplayFuture{
-    pub fn new(known_displays: HashSet<(u32, String)>, displays: Arc<Mutex<HashSet<(u32, String)>>>, waker: Arc<Mutex<Vec<Waker>>>) -> Self{
+    pub fn new(known_displays: HashSet<(u32, String, String)>, displays: Arc<Mutex<HashSet<(u32, String, String)>>>, waker: Arc<Mutex<Vec<Waker>>>) -> Self{
         Self{known_displays, displays, waker}
     }
 }
 impl Future for NewDisplayFuture{
-    type Output = HashSet<(u32, String)>;
+    type Output = HashSet<(u32, String, String)>;
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         if let Ok(display_guard) = self.displays.lock(){
             if !display_guard.is_subset(&self.known_displays) {
-                Poll::Ready(display_guard.difference(&self.known_displays).cloned().collect::<HashSet<(u32, String)>>())
+                Poll::Ready(display_guard.difference(&self.known_displays).cloned().collect::<HashSet<(u32, String, String)>>())
             }else {
                 if let Ok(mut waker_guard) = self.waker.lock() {waker_guard.push(cx.waker().to_owned());}
                 Poll::Pending
