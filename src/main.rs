@@ -146,7 +146,7 @@ pub async fn post_mouse_root(vm_type: LaunchConfig, output_id: u32, ss: &mut Sys
     let xml_path = create_xml(vm_type.clone(), output_id).map_err(|err| AppError::FailedToCreateXml(err))?;
     // launch the vm
     println!("Launching the vm");
-    let handle = system_setup::launch_vm(xml_path).map_err(|err| AppError::FailedToLaunchVm(err))?;
+    let handle = system_setup::launch_vm(xml_path).await.map_err(|err| AppError::FailedToLaunchVm(err))?;
     // setup session handler for launching vm viewer
     println!("Setting up viewer session handler");
     Sessions::create_viewer_session_handler(vm_type, ss).await.map_err(|err| AppError::FailedToCreateViewAppHandler(err))?;

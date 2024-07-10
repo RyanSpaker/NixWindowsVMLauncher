@@ -133,15 +133,17 @@ impl Sessions{
                         Err(err) => {println!("Failed to get environment from user systemd {}, with err {}", user_path, err); handle.abort(); continue;}
                     };
                     // find xauth path from env
+                    let mut found = false;
                     for var in env_vars.iter() {
                         if var.starts_with("XAUTHORITY="){
                             let xauth_path = var.strip_prefix("XAUTHORITY=").unwrap();
                             println!("Found new Display: {} {} {} {} {}", u, n, c, d, xauth_path);
                             new_displays.push((u, d, xauth_path.to_string()));
+                            found = true;
                             break;
                         }
                     }
-                    println!("Failed to find XAUTHORITY in {:?}", env_vars);
+                    if found {println!("Failed to find XAUTHORITY in {:?}", env_vars);}
                     handle.abort();
                 }
                 // add display values

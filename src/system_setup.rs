@@ -392,11 +392,17 @@ pub fn create_xml(vm_type: LaunchConfig, mouse_id: u32) -> Result<String, SetupE
 }
 
 /// Launches the vm, returning a handle to the process. process should finish after vm is shutdown
-pub fn launch_vm(path: String) -> Result<JoinHandle<()>, SetupError>{
+pub async fn launch_vm(path: String) -> Result<JoinHandle<()>, SetupError>{
     let log_file = File::create("/tmp/windows_vm_log.txt").map_err(|err| SetupError::CouldNotCreateWindowsLogFile(err))?;
     let log_file2 = File::create("/tmp/windows_vm_err_log.txt").map_err(|err| SetupError::CouldNotCreateWindowsLogFile(err))?;
-    let mut child = tokio::process::Command::new("virsh").args(["-cqemu:///system", "create", &path, "--console"])
+    let _ = tokio::process::Command::new("virsh").args(["-cqemu:///system", "create", &path])
         .stdout(log_file).stderr(log_file2).spawn()
-        .map_err(|err| SetupError::FailedToLaunchVM(err))?;
-    Ok(tokio::spawn(async move {let _ = child.wait().await;}))
+        .map_err(|err| SetupError::FailedToLaunchVM(err))?.wait().await;
+    Ok(tokio::spawn(async move {
+        loop{
+            if !tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"])
+                .stderr(Stdio::null()).stdout(Stdio::null()).output()
+                .await.is_ok_and(|output| output.status.success()) {break;}
+        }
+    }))
 }
