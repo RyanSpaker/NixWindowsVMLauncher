@@ -45,6 +45,7 @@ impl Sessions{
                 guard.push(path.to_string());
                 if let Ok(Some(waker)) = waker.lock().map(|mut opt| opt.take()) {waker.wake();}
             }
+            println!("Recieve NewSession Signal: {:?}", path);
             true
         });
         ss.session.signal_handle = Some(incoming_signal);
@@ -62,6 +63,7 @@ impl Sessions{
             if !guard.contains(&path.to_string()) {
                 guard.push(path.to_string());
             }
+            println!("Found initial session: {:?}", path);
         }
         // spawn handler for new sessions list
         let displays = ss.session.displays.clone();
