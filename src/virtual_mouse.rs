@@ -167,7 +167,7 @@ impl MouseManager{
                 for (_, display, xauth) in new_displays.iter(){
                     match toggle_mouse(display.to_owned(), xauth.to_owned(), input_id, false).await{
                         Ok(id) => {println!("Disabled mouse {}, libinput {}, successfully", input_id, id)},
-                        Err(err) => {println!("Failed to disable mouse {}, on display {}, with err {}", input_id, display, err.to_string());}
+                        Err(err) => {println!("Failed to disable mouse {}, on display {}, with xauth: {}, with err {}", input_id, display, xauth, err.to_string());}
                     }
                 }
                 known_displays.extend(new_displays);
