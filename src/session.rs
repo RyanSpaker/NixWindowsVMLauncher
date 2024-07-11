@@ -41,11 +41,11 @@ impl Sessions{
             .map_err(|err| SessionError::FailedToAddSignalMatchToSystemBus(err))?
             .cb(move |_, (_, path): (String, dbus::Path)| 
         {
-            if let Ok(mut guard) = session_list.lock() {
-                guard.push(path.to_string());
-                if let Ok(Some(waker)) = waker.lock().map(|mut opt| opt.take()) {waker.wake();}
-            }
             println!("Recieve NewSession Signal: {:?}", path);
+            let mut guard = session_list.lock().unwrap();
+            guard.push(path.to_string());
+            if let Some(waker) = waker.lock().unwrap().take() {waker.wake();}
+            println!("Processed NewSession Signal: {:?}", path);
             true
         });
         ss.session.signal_handle = Some(incoming_signal);
@@ -269,15 +269,12 @@ pub struct NewSessionFuture{
 impl Future for NewSessionFuture{
     type Output = Vec<String>;
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-        if let Ok(mut guard) = self.sessions.lock() {
-            if guard.is_empty() {
-                if let Ok(mut waker_guard) = self.waker.lock() {
-                    let _ = waker_guard.insert(cx.waker().to_owned());
-                }
-                Poll::Pending
-            }else {
-                Poll::Ready(guard.drain(..).collect::<Vec<String>>())
-            }
-        }else {Poll::Pending}
+        let mut guard = self.sessions.lock().unwrap();
+        if guard.is_empty() {
+            let _ = self.waker.lock().unwrap().insert(cx.waker().to_owned());
+            Poll::Pending
+        }else {
+            Poll::Ready(guard.drain(..).collect::<Vec<String>>())
+        }
     }
 }
