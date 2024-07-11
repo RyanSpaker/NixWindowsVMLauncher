@@ -315,5 +315,8 @@ pub async fn toggle_mouse(display: String, xauth_path: String, input_id: u32, en
             }
         }
     }
+    println!("Failed to find mouse from xinput list, searching for xauth file to ensure it is correct");
+    let names: Vec<std::ffi::OsString> = Path::new("/tmp").read_dir().unwrap().map(|child| child.unwrap().file_name()).collect();
+    println!("tmp contents: {:?}", names);
     Err(MouseError::FailedToFindMouseIDFromXInput(String::from_utf8_lossy(&output.stdout).to_string(), String::from_utf8_lossy(&output.stderr).to_string()))
 }

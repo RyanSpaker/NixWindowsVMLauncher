@@ -146,7 +146,7 @@ impl Sessions{
                             break;
                         }
                     }
-                    if found {println!("Failed to find XAUTHORITY in {:?}", env_vars);}
+                    if !found {println!("Failed to find XAUTHORITY in {:?}", env_vars);}
                     handle.abort();
                 }
                 // add display values
