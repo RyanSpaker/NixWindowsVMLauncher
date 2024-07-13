@@ -4,7 +4,7 @@ use input::{event::{pointer::{ButtonState, PointerScrollEvent}, PointerEvent}, E
 use nix::libc::{O_RDONLY, O_RDWR, O_WRONLY};
 use tokio::task::JoinHandle;
 
-use crate::{session, SystemState};
+use crate::{dbus_manager::{DisplaySessionChangeFuture, Session}, SystemState};
 
 /// Errors that can be thrown by the mouse driver
 #[derive(Debug)]
@@ -157,30 +157,28 @@ impl MouseManager{
     }
     /// creates a callback for new sessions which disables the original mouse
     pub async fn setup_session_handler(&mut self, ss: &mut SystemState) -> Result<JoinHandle<()>, MouseError>{
-        let mut known_displays: HashSet<(u32, String, String)> = HashSet::new();
-        let displays = ss.session.displays.clone();
-        let wakers = ss.session.display_waker.clone();
-        let input_id = self.input_id;
-        let handle = tokio::spawn(async move {
-            loop{
-                let new_displays: HashSet<(u32, String, String)> = session::NewDisplayFuture::new(known_displays.clone(), displays.clone(), wakers.clone()).await;
-                for (_, display, xauth) in new_displays.iter(){
-                    match toggle_mouse(display.to_owned(), xauth.to_owned(), input_id, false).await{
-                        Ok(id) => {println!("Disabled mouse {}, libinput {}, successfully", input_id, id)},
-                        Err(err) => {println!("Failed to disable mouse {}, on display {}, with xauth: {}, with err {}", input_id, display, xauth, err.to_string());}
-                    }
+        let mut known_sessions: HashSet<Session> = HashSet::new();
+        let input_id = self.input_id.clone();
+        let dbus = ss.dbus.clone();
+        Ok(tokio::task::spawn(async move {loop{
+            let known_displays = known_sessions.iter().map(|sess| sess.path.clone()).collect::<HashSet<String>>();
+            let sessions = DisplaySessionChangeFuture{dbus: dbus.clone(), known_displays: known_displays}.await;
+            let new_sessions = sessions.difference(&known_sessions).collect::<Vec<&Session>>();
+            for session in new_sessions{
+                match toggle_mouse(session.display.to_owned(), session.xauthority_path.to_owned(), input_id, false).await{
+                    Ok(id) => {println!("Disabled mouse {}, libinput {}, successfully", input_id, id)},
+                    Err(err) => {println!("Failed to disable mouse {}, on display {}, with xauth: {}, with err {}", input_id, session.display, session.xauthority_path, err.to_string());}
                 }
-                known_displays.extend(new_displays);
             }
-        });
-        Ok(handle)
+            known_sessions = sessions;
+        }}))
     }
     /// enables the input mouse on all current sessions.
     pub async fn reset_sessions(ss: &mut SystemState) {
-        if let Ok(display) = ss.session.displays.lock() {
-            for (_, display, xauth) in display.iter(){
-                std::env::set_var("DISPLAY", display.to_owned());
-                let _ = toggle_mouse(display.to_owned(), xauth.to_owned(), ss.mouse.input_id, true).await;
+        if let Ok(dbus) = ss.dbus.lock() {
+            for session in dbus.sessions.values(){
+                std::env::set_var("DISPLAY", session.display.to_owned());
+                let _ = toggle_mouse(session.display.to_owned(), session.xauthority_path.to_owned(), ss.mouse.input_id, true).await;
             }
         }
     }

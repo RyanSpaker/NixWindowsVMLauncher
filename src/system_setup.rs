@@ -2,7 +2,7 @@ use std::{env::{self, VarError}, ffi::OsStr, fs::File, io::{Read, Write}, path::
 use dbus::arg::Variant;
 use tokio::task::JoinHandle;
 
-use crate::{dbus_manager::DBusError, LaunchConfig, SystemState};
+use crate::{dbus_manager::{DBusError, DBusManager}, LaunchConfig, SystemState};
 
 // Calls the command with the args
 pub fn call_command<I, S>(command: &str, args: I) -> std::io::Result<Output>
@@ -13,7 +13,7 @@ where I: IntoIterator<Item = S>, S: AsRef<OsStr> {
 pub mod gpu {
     use std::{collections::HashMap, time::Duration};
     use dbus::Path;
-    use crate::{dbus_manager::DBusError, SystemState, system_setup::call_command};
+    use crate::{dbus_manager::{DBusError, DBusManager}, system_setup::call_command, SystemState};
 
     /// Represents all fail state for the process of disconnecting the gpu from linux
     #[derive(Debug)]
@@ -87,8 +87,6 @@ pub mod gpu {
         ).await.map_err(|err| GpuSetupError::FailedToStopDP(err))?;
         ss.gpu_state.dp_state = ServiceState::Stopped;
         // Stop pipewire
-        println!("Connecting to Users");
-        ss.dbus.connect_users().await.map_err(|err| GpuSetupError::FailedToConnectUsers(err))?;
         println!("Stopping Pipewire");
         let pw_stop_jobs: HashMap<u32, (Path,)> = ss.dbus.call_user_method(
             "org.freedesktop.systemd1", 
@@ -246,10 +244,7 @@ pub mod gpu {
         if let ServiceState::Stopped = ss.gpu_state.pw_state {pw_reset = true;} 
         if let ServiceState::Stopped = ss.gpu_state.pwp_state {pw_reset = true;}
         if let ServiceState::Stopped = ss.gpu_state.dp_state {dp_reset = true;}
-        if ss.dbus.check_system_bus().await.is_err() {return;}
         if pw_reset {
-            println!("Connecting Users");
-            let _ = ss.dbus.connect_users().await;
             println!("Restarting PW");
             let _: Result<HashMap<u32, (Path,)>, DBusError> = ss.dbus.call_user_method(
                 "org.freedesktop.systemd1", 
@@ -356,26 +351,24 @@ pub async fn revert_performance_enhancements(ss: &mut SystemState) {
             let _ = file.write("powersave".as_bytes());
         }        
     }
-    if ss.dbus.check_system_bus().await.is_ok() {
-        let _: Result<(), DBusError> = ss.dbus.call_system_method(
-            "org.freedesktop.systemd1", 
-            "/org/freedesktop/systemd1/unit/user_2eslice", 
-            "org.freedesktop.systemd1.Unit", 
-            "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
-        ).await;
-        let _: Result<(), DBusError> = ss.dbus.call_system_method(
-            "org.freedesktop.systemd1", 
-            "/org/freedesktop/systemd1/unit/system_2eslice", 
-            "org.freedesktop.systemd1.Unit", 
-            "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
-        ).await;
-        let _: Result<(), DBusError> = ss.dbus.call_system_method(
-            "org.freedesktop.systemd1", 
-            "/org/freedesktop/systemd1/unit/unit_2escope", 
-            "org.freedesktop.systemd1.Unit", 
-            "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
-        ).await;
-    }
+    let _: Result<(), DBusError> = ss.dbus.call_system_method(
+        "org.freedesktop.systemd1", 
+        "/org/freedesktop/systemd1/unit/user_2eslice", 
+        "org.freedesktop.systemd1.Unit", 
+        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
+    ).await;
+    let _: Result<(), DBusError> = ss.dbus.call_system_method(
+        "org.freedesktop.systemd1", 
+        "/org/freedesktop/systemd1/unit/system_2eslice", 
+        "org.freedesktop.systemd1.Unit", 
+        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
+    ).await;
+    let _: Result<(), DBusError> = ss.dbus.call_system_method(
+        "org.freedesktop.systemd1", 
+        "/org/freedesktop/systemd1/unit/unit_2escope", 
+        "org.freedesktop.systemd1.Unit", 
+        "SetProperties", (true, vec![("AllowedCPUs", Variant(vec![255_u8, 255_u8, 15_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8]))])
+    ).await;
 }
 
 /// creates the vm xml, returning the path to it
