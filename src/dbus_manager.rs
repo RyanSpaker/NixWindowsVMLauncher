@@ -2,7 +2,7 @@
 // It also tracks sessions and opens user connections as needed
 use std::{collections::{HashMap, HashSet}, fs::File, process::Stdio, sync::{Arc, Mutex}, task::{Poll, Waker}, time::Duration};
 use dbus::{
-    arg::{AppendAll, ReadAll}, channel::Channel, message::MatchRule, nonblock::{stdintf::org_freedesktop_dbus::Properties, MsgMatch, SyncConnection}, strings::{BusName, Interface, Member}, Path
+    arg::{AppendAll, ReadAll}, channel::{Channel, Token}, message::MatchRule, nonblock::{stdintf::org_freedesktop_dbus::Properties, SyncConnection}, strings::{BusName, Interface, Member}, Path
 };
 use dbus_tokio::connection::IOResourceError;
 use futures::Future;
@@ -154,7 +154,7 @@ pub struct DBusConnections{
     pub sessions: HashMap<String, Session>,
     /// List of wakers to call when the number of displays changes
     pub display_change_wakers: Vec<Waker>,
-    signal_handles: Option<(MsgMatch, MsgMatch)>
+    signal_handles: Option<(Token, Token)>
 }
 impl DBusConnections{
     /// Create new struct with a connection to the system bus
@@ -162,7 +162,7 @@ impl DBusConnections{
         Ok(Self{system: Connection::new_system()?, users: HashMap::new(), displays: HashSet::new(), sessions: HashMap::new(), display_change_wakers: vec![], signal_handles: None})
     }
     /// Async fn which continuosly handles new sessions forever
-    pub async fn create_session_handler(data: Arc<Mutex<Self>>) -> Result<(), DBusError> {
+    pub async fn create_session_handler(data: Arc<Mutex<Self>>) -> Result<JoinHandle<()>, DBusError> {
         // sessions currently handled by the data struct
         let mut known_sessions: HashSet<(String, u32)> = HashSet::new();
         let mut invalid_sessions: HashSet<(String, u32)> = HashSet::new();
@@ -193,22 +193,24 @@ impl DBusConnections{
                 if let Ok(Some(waker)) = waker_copy.lock().map(|mut guard| guard.take()) {waker.wake();}
                 true
             });
-        data.lock().unwrap().signal_handles = Some((incoming_signal, incoming_signal2));
+        data.lock().unwrap().signal_handles = Some((incoming_signal.token(), incoming_signal2.token()));
 
         let mut new_sessions: HashSet<(String, u32)> = HashSet::new();
         let mut new_session_info: HashMap<String, (String, dbus::Path)> = HashMap::new();
-        loop{
+        let handle = tokio::task::spawn_local(async move {loop{
             // wait either 5 seconds, or until a signal is sent on login
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {},
                 _ = NewSignalFuture::new(waker.clone()) => {}
             }
+            println!("Getting current session list");
             // get the current sessions from login1 as HashSet(object-path, uid)
             let current_sessions = HashSet::from_iter(proxy.method_call::<(Vec<(String, u32, String, String, dbus::Path)>,), _, _, _>(
                 "org.freedesktop.login1.Manager", 
                 "ListSessions", 
                 ()
-            ).await.map_err(|err| DBusError::FailedToGetSessions(err))?.0.into_iter().map(|(_, uid, _, _, path)| (path.to_string(), uid.to_owned())));
+            ).await.map_err(|err| DBusError::FailedToGetSessions(err)).unwrap().0.into_iter().map(|(_, uid, _, _, path)| (path.to_string(), uid.to_owned())));
+            println!("Current Sessions: {:?}", current_sessions);
             // if state hasnt changed, continue
             if current_sessions == known_sessions {continue;}
             
@@ -223,13 +225,13 @@ impl DBusConnections{
                     system_connection.clone()
                 );
                 let class = temp_proxy.get::<String>("org.freedesktop.login1.Session", "Class").await
-                    .map_err(|err| DBusError::FailedToGetSessionClass(path.to_string(), err))?;
+                    .map_err(|err| DBusError::FailedToGetSessionClass(path.to_string(), err)).unwrap();
                 if class == "User" {
                     new_sessions.insert((path.to_string(), uid.to_owned()));
                     let display = temp_proxy.get::<String>("org.freedesktop.login1.Session", "Display").await
-                        .map_err(|err| DBusError::FailedToGetSessionDisplay(path.to_string(), err))?;
+                        .map_err(|err| DBusError::FailedToGetSessionDisplay(path.to_string(), err)).unwrap();
                     let (_, user_path) = temp_proxy.get::<(u32, dbus::Path)>("org.freedesktop.login1.Session", "User").await
-                        .map_err(|err| DBusError::FailedToGetSessionUser(path.to_string(), err))?;
+                        .map_err(|err| DBusError::FailedToGetSessionUser(path.to_string(), err)).unwrap();
                     new_session_info.insert(path.to_string(), (display, user_path));
                 }else {
                     invalid_sessions.insert((path.to_string(), uid.to_owned()));
@@ -241,7 +243,7 @@ impl DBusConnections{
             // if there is no work to be done on data, continue
             if new_sessions.len() == 0 && old_sessions.len() == 0 {continue;}
             
-            let mut data_guard = data.lock().map_err(|err| DBusError::FailedToAqcuireConnectionsLock(err.to_string()))?;
+            let mut data_guard = data.lock().map_err(|err| DBusError::FailedToAqcuireConnectionsLock(err.to_string())).unwrap();
             let mut wake = false;
             // create new sessions
             for (path, uid) in new_sessions.iter(){
@@ -256,9 +258,9 @@ impl DBusConnections{
                         system_connection.clone()
                     );
                     let runtime_path = temp_proxy.get::<String>("org.freedesktop.login1.User", "RuntimePath").await
-                        .map_err(|err| DBusError::FailedToGetUserRuntimePath(path.to_string(), err))?;
+                        .map_err(|err| DBusError::FailedToGetUserRuntimePath(path.to_string(), err)).unwrap();
                     let addr = runtime_path.to_string() + "/bus";
-                    let connection = Connection::new_channel(uid.clone(), addr).await?;
+                    let connection = Connection::new_channel(uid.clone(), addr).await.unwrap();
                     data_guard.users.insert(uid.clone(), (HashSet::from_iter([path.clone()]), connection));
                 }
                 // get xauthority if display exists
@@ -270,7 +272,7 @@ impl DBusConnections{
                         "/org/freedesktop/systemd1", 
                         "org.freedesktop.systemd1.Manager", 
                         "Environment"
-                    ).await.map_err(|err| DBusError::FailedToGetSystemdEnvironment(uid.to_owned(), err))?;
+                    ).await.map_err(|err| DBusError::FailedToGetSystemdEnvironment(uid.to_owned(), err)).unwrap();
                     if let Some(var) = env.iter().find(|var| var.starts_with("XAUTHORITY=")) {
                         xauthority_path = var.strip_prefix("XAUTHORITY=").unwrap().to_string();
                     }
@@ -278,7 +280,9 @@ impl DBusConnections{
                     wake = true;
                 }
                 // place everything in the object
-                data_guard.sessions.insert(path.to_owned(), Session{path: path.to_owned(), display, xauthority_path, uid: uid.clone()});
+                let session = Session{path: path.to_owned(), display, xauthority_path, uid: uid.clone()};
+                println!("Found new session at path {:?}, : {:?}", path, session);
+                data_guard.sessions.insert(path.to_owned(), session);
             }
             // kill old sessions
             for (path, uid) in old_sessions.into_iter() {
@@ -302,7 +306,8 @@ impl DBusConnections{
             }
             // wake up display change futures
             if wake {data_guard.display_change_wakers.drain(..).for_each(|waker| waker.wake());}
-        }
+        }});
+        return Ok(handle);
     }
     /// Call a method on the system bus
     pub async fn call_system_method<'a, D, P, I, M, A, R>(&mut self, dest: D, path: P, interface: I, method: M, args: A) -> Result<R, DBusError> 

@@ -6,7 +6,7 @@ use dbus_manager::{DBusConnections, DBusError};
 use system_setup::{create_xml, gpu::{GpuSetupError, GpuSetupState}, revert_performance_enhancements, PerformanceState, SetupError};
 use tokio::task::LocalSet;
 use virtual_mouse::{MouseError, MouseState};
-use std::{env::args, sync::{Arc, Mutex}};
+use std::{env::args, sync::{Arc, Mutex}, time::Duration};
 use nix::unistd::Uid;
 
 
@@ -34,7 +34,9 @@ pub enum AppError{
     FailedToLaunchVm(SetupError),
     MouseUpdateFailed(MouseError),
     FailedToStartDP(GpuSetupError),
-    FailedToSetupViewerSessionHandler(DBusError)
+    FailedToSetupViewerSessionHandler(DBusError),
+    FailedToFindSession,
+    FailedToSetupSessionHandler(DBusError)
 }
 impl std::fmt::Display for AppError{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -49,7 +51,9 @@ impl std::fmt::Display for AppError{
             AppError::FailedToLaunchVm(err) => format!("Could not launch the vm: {}", err.to_string()),
             AppError::MouseUpdateFailed(err) => format!("Mouse update loop failed with err: {}", err.to_string()),
             AppError::FailedToStartDP(err) => format!("Starting the Display Manager Failed: {}", err.to_string()),
-            AppError::FailedToSetupViewerSessionHandler(err) => format!("Setting up the viewer session handler failed: {}", err.to_string())
+            AppError::FailedToSetupViewerSessionHandler(err) => format!("Setting up the viewer session handler failed: {}", err.to_string()),
+            AppError::FailedToFindSession => format!("Failed to find a session within 30 seconds"),
+            AppError::FailedToSetupSessionHandler(err) => format!("Failed to setup session handler: {}", err.to_string())
         };
         f.write_str(string.as_str())
     }
@@ -108,14 +112,18 @@ async fn root_app(ss: &mut SystemState, vm_type: LaunchConfig, mouse_path: Strin
     println!("Start");
 
     println!("Creating Session Handler");
-    let session_handle = tokio::task::spawn_local(DBusConnections::create_session_handler(ss.dbus.clone()));
+    let session_handle = DBusConnections::create_session_handler(ss.dbus.clone()).await
+        .map_err(|err| AppError::FailedToSetupSessionHandler(err))?;
     
     // dc gpu
     if vm_type.requires_gpu_dc() {
         system_setup::gpu::dc_gpu(ss).await.map_err(|err| AppError::FailedToDCGpu(err))?;
         system_setup::gpu::start_dp(ss).await.map_err(|err| AppError::FailedToStartDP(err))?;
         println!("Waiting for session");
-        dbus_manager::AnyDisplayFuture::new(ss.dbus.clone()).await;
+        tokio::select! {
+            _ = dbus_manager::AnyDisplayFuture::new(ss.dbus.clone()) => {},
+            _ = tokio::time::sleep(Duration::from_secs(30)) => {return Err(AppError::FailedToFindSession)}
+        }
     }
 
     // easy performance enhancements
