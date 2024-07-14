@@ -171,6 +171,7 @@ async fn root_app_v2(vm_type: LaunchConfig, output_id: u32, ss: &mut SystemState
 }
 /// reverts pc configuration
 async fn cleanup(mut ss: SystemState){
+    let _ = std::process::Command::new("virsh").args(["-cqemu:///system", "destroy", "windows"]).output().unwrap();
     // reverse performance
     println!("Reverting Performance Enhancements");
     revert_performance_enhancements(&mut ss).await;
