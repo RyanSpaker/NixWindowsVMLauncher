@@ -540,6 +540,7 @@ pub fn setup_viewer_session_handler(dbus: Arc<Mutex<DBusConnections>>, vm_type: 
             }
         }
         for session in new_sessions{
+            println!("Launching viewer for session: {:?}", session);
             let mut xauth = session.xauthority_path.clone();
             let user = dbus.lock().unwrap().users.get(&session.uid).cloned();
             if let Some(user) = user{
@@ -548,6 +549,7 @@ pub fn setup_viewer_session_handler(dbus: Arc<Mutex<DBusConnections>>, vm_type: 
                 for var in env {
                     if var.starts_with("XAUTHORITY=") {xauth = var.strip_prefix("XAUTHORITY=").unwrap().to_string();}
                 }
+                println!("Refound xauth: {}", xauth);
             }
             let _ = users::switch::set_effective_uid(session.uid.to_owned());
             let child = match vm_type {

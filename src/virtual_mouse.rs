@@ -174,10 +174,11 @@ impl MouseManager{
                     for var in env {
                         if var.starts_with("XAUTHORITY=") {xauth = var.strip_prefix("XAUTHORITY=").unwrap().to_string();}
                     }
+                    println!("Found xauth: {:?}", xauth);
                 }
-                match toggle_mouse(session.display.to_owned(), xauth, input_id, false).await{
+                match toggle_mouse(session.display.to_owned(), xauth.to_owned(), input_id, false).await{
                     Ok(id) => {println!("Disabled mouse {}, libinput {}, successfully", input_id, id)},
-                    Err(err) => {println!("Failed to disable mouse {}, on display {}, with xauth: {}, with err {}", input_id, session.display, session.xauthority_path, err.to_string());}
+                    Err(err) => {println!("Failed to disable mouse {}, on display {}, with xauth: {}, with err {}", input_id, session.display, xauth, err.to_string());}
                 }
             }
             known_sessions = sessions;
