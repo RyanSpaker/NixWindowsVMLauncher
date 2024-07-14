@@ -192,12 +192,11 @@ impl DBusConnections{
         let mut new_session_info: HashMap<String, (String, dbus::Path)> = HashMap::new();
         let handle = tokio::task::spawn(async move {loop{
             // wait either 5 seconds, or until a signal is sent on login
-            println!("Waiting for new sessions");
+            println!("Waiting for new sessions, invalid: {:?}, valid: {:?}", invalid_sessions, valid_sessions);
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {},
-                _ = NewSignalFuture::new(waker.clone()) => {}
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {println!("Waited, 5 seconds, getting sessions")},
+                _ = NewSignalFuture::new(waker.clone()) => {println!("recieved signal, getting sessions")}
             }
-            println!("Getting current session list");
             // get the current sessions from login1 as HashSet(object-path, uid)
             let current_sessions = HashSet::from_iter(proxy.method_call::<(Vec<(String, u32, String, String, dbus::Path)>,), _, _, _>(
                 "org.freedesktop.login1.Manager", 
@@ -207,7 +206,7 @@ impl DBusConnections{
             println!("Current Sessions: {:?}", current_sessions);
             // if state hasnt changed, continue
             if current_sessions == known_sessions {continue;}
-            
+            println!("Found session discrepency");
             // go through the new sessions, and find out whether they are valid or not
             new_sessions.clear(); new_session_info.clear();
             for (path, uid) in current_sessions.difference(&known_sessions.clone()){
@@ -227,13 +226,14 @@ impl DBusConnections{
                     let (_, user_path) = temp_proxy.get::<(u32, dbus::Path)>("org.freedesktop.login1.Session", "User").await
                         .map_err(|err| DBusError::FailedToGetSessionUser(path.to_string(), err)).unwrap();
                     new_session_info.insert(path.to_string(), (display, user_path));
+                    valid_sessions.insert((path.to_string(), uid.to_owned()));
                 }else {
                     invalid_sessions.insert((path.to_string(), uid.to_owned()));
-                    known_sessions.insert((path.to_string(), uid.to_owned()));
                 }
+                known_sessions.insert((path.to_string(), uid.to_owned()));
             }
             let old_sessions = valid_sessions.difference(&current_sessions).cloned().collect::<HashSet<(String, u32)>>();
-
+            println!("Found old sessions: {:?}, and new sessions: {:?} info: {:?}", old_sessions, new_sessions, new_session_info);
             // if there is no work to be done on data, continue
             if new_sessions.len() == 0 && old_sessions.len() == 0 {continue;}
             
