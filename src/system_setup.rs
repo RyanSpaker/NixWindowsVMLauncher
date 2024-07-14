@@ -394,6 +394,9 @@ pub async fn launch_vm(path: String) -> Result<JoinHandle<()>, SetupError>{
     let _ = tokio::process::Command::new("virsh").args(["-cqemu:///system", "create", &path])
         .stdout(log_file).stderr(log_file2).spawn()
         .map_err(|err| SetupError::FailedToLaunchVM(err))?.wait().await;
+    while !tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"])
+        .stderr(Stdio::null()).stdout(Stdio::null()).output()
+        .await.is_ok_and(|output| output.status.success()) {}
     Ok(tokio::spawn(async move {
         loop{
             if !tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"])

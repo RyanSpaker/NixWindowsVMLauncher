@@ -1,4 +1,5 @@
-use std::{collections::HashSet, ffi::OsStr, fs::{File, OpenOptions}, num::ParseIntError, os::{fd::OwnedFd, unix::fs::OpenOptionsExt}, path::Path, process::{Output, Stdio}};
+use std::{collections::HashSet, ffi::OsStr, fs::{File, OpenOptions}, num::ParseIntError, os::{fd::OwnedFd, unix::fs::OpenOptionsExt}, path::Path, process::{Output, Stdio}, time::Duration};
+use dbus::nonblock::{stdintf::org_freedesktop_dbus::Properties, Proxy};
 use evdev::{uinput::{VirtualDevice, VirtualDeviceBuilder}, AttributeSet, Device, EventStream, EventType, InputEvent, Key, RelativeAxisType};
 use input::{event::{pointer::{ButtonState, PointerScrollEvent}, PointerEvent}, Event, Libinput, LibinputInterface};
 use nix::libc::{O_RDONLY, O_RDWR, O_WRONLY};
@@ -165,7 +166,16 @@ impl MouseManager{
             let sessions = DisplaySessionChangeFuture{dbus: dbus.clone(), known_displays: known_displays}.await;
             let new_sessions = sessions.difference(&known_sessions).collect::<Vec<&Session>>();
             for session in new_sessions{
-                match toggle_mouse(session.display.to_owned(), session.xauthority_path.to_owned(), input_id, false).await{
+                let mut xauth = session.xauthority_path.clone();
+                let user = dbus.lock().unwrap().users.get(&session.uid).cloned();
+                if let Some(user) = user{
+                    let proxy = Proxy::new("org.freedesktop.systemd1", "/org/freedesktop/systemd1", Duration::from_secs(2), user.1.conn.clone());
+                    let env = proxy.get::<Vec<String>>("org.freedesktop.systemd1.Manager", "Environment").await.unwrap();
+                    for var in env {
+                        if var.starts_with("XAUTHORITY=") {xauth = var.strip_prefix("XAUTHORITY=").unwrap().to_string();}
+                    }
+                }
+                match toggle_mouse(session.display.to_owned(), xauth, input_id, false).await{
                     Ok(id) => {println!("Disabled mouse {}, libinput {}, successfully", input_id, id)},
                     Err(err) => {println!("Failed to disable mouse {}, on display {}, with xauth: {}, with err {}", input_id, session.display, session.xauthority_path, err.to_string());}
                 }

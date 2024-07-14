@@ -2,7 +2,7 @@
 // It also tracks sessions and opens user connections as needed
 use std::{collections::{HashMap, HashSet}, fs::File, process::Stdio, sync::{Arc, Mutex}, task::{Poll, Waker}, time::Duration};
 use dbus::{
-    arg::{AppendAll, ReadAll}, channel::Channel, message::MatchRule, nonblock::{stdintf::org_freedesktop_dbus::Properties, MsgMatch, SyncConnection}, strings::{BusName, Interface, Member}, Path
+    arg::{AppendAll, ReadAll}, channel::Channel, message::MatchRule, nonblock::{stdintf::org_freedesktop_dbus::Properties, MsgMatch, Proxy, SyncConnection}, strings::{BusName, Interface, Member}, Path
 };
 use dbus_tokio::connection::IOResourceError;
 use futures::Future;
@@ -540,6 +540,15 @@ pub fn setup_viewer_session_handler(dbus: Arc<Mutex<DBusConnections>>, vm_type: 
             }
         }
         for session in new_sessions{
+            let mut xauth = session.xauthority_path.clone();
+            let user = dbus.lock().unwrap().users.get(&session.uid).cloned();
+            if let Some(user) = user{
+                let proxy = Proxy::new("org.freedesktop.systemd1", "/org/freedesktop/systemd1", Duration::from_secs(2), user.1.conn.clone());
+                let env = proxy.get::<Vec<String>>("org.freedesktop.systemd1.Manager", "Environment").await.unwrap();
+                for var in env {
+                    if var.starts_with("XAUTHORITY=") {xauth = var.strip_prefix("XAUTHORITY=").unwrap().to_string();}
+                }
+            }
             let _ = users::switch::set_effective_uid(session.uid.to_owned());
             let child = match vm_type {
                 LaunchConfig::LG => {
@@ -548,7 +557,7 @@ pub fn setup_viewer_session_handler(dbus: Arc<Mutex<DBusConnections>>, vm_type: 
                     } else {(Stdio::null(), Stdio::null())};
                     tokio::process::Command::new("looking-glass-client")
                         .args(["-T", "-s", "input:captureOnFocus"])
-                        .envs([("DISPLAY", session.display.to_owned()), ("XAUTHORITY", session.xauthority_path.to_owned())])
+                        .envs([("DISPLAY", session.display.to_owned()), ("XAUTHORITY", xauth)])
                         .uid(session.uid.to_owned())
                         .stdout(log).stderr(err_log).spawn()
                 },
@@ -558,7 +567,7 @@ pub fn setup_viewer_session_handler(dbus: Arc<Mutex<DBusConnections>>, vm_type: 
                     } else {(Stdio::null(), Stdio::null())};
                     tokio::process::Command::new("virt-viewer")
                         .args(["--connect", "qemu:///system", "windows"])
-                        .envs([("DISPLAY", session.display.to_owned()), ("XAUTHORITY", session.xauthority_path.to_owned())])
+                        .envs([("DISPLAY", session.display.to_owned()), ("XAUTHORITY", xauth)])
                         .uid(session.uid.to_owned())
                         .stdout(log).stderr(err_log).spawn()
                 },
