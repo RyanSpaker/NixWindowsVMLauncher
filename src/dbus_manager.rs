@@ -210,6 +210,7 @@ impl DBusConnections{
             // go through the new sessions, and find out whether they are valid or not
             new_sessions.clear(); new_session_info.clear();
             for (path, uid) in current_sessions.difference(&known_sessions.clone()){
+                println!("Looking at session {:?}", path);
                 // determine if session is user session
                 let temp_proxy = dbus::nonblock::Proxy::new(
                     "org.freedesktop.login1", 
@@ -219,7 +220,7 @@ impl DBusConnections{
                 );
                 let class = temp_proxy.get::<String>("org.freedesktop.login1.Session", "Class").await
                     .map_err(|err| DBusError::FailedToGetSessionClass(path.to_string(), err)).unwrap();
-                if class == "User" {
+                if class == "user" {
                     new_sessions.insert((path.to_string(), uid.to_owned()));
                     let display = temp_proxy.get::<String>("org.freedesktop.login1.Session", "Display").await
                         .map_err(|err| DBusError::FailedToGetSessionDisplay(path.to_string(), err)).unwrap();
