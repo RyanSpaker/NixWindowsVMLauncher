@@ -2,7 +2,7 @@
 // It also tracks sessions and opens user connections as needed
 use std::{collections::{HashMap, HashSet}, fs::File, process::Stdio, sync::{Arc, Mutex}, task::{Poll, Waker}, time::Duration};
 use dbus::{
-    arg::{AppendAll, ReadAll}, channel::{Channel, Token}, message::MatchRule, nonblock::{stdintf::org_freedesktop_dbus::Properties, SyncConnection}, strings::{BusName, Interface, Member}, Path
+    arg::{AppendAll, ReadAll}, channel::Channel, message::MatchRule, nonblock::{stdintf::org_freedesktop_dbus::Properties, MsgMatch, SyncConnection}, strings::{BusName, Interface, Member}, Path
 };
 use dbus_tokio::connection::IOResourceError;
 use futures::Future;
@@ -148,7 +148,7 @@ pub struct DBusConnections{
     pub sessions: HashMap<String, Session>,
     /// List of wakers to call when the number of displays changes
     pub display_change_wakers: Vec<Waker>,
-    signal_handles: Option<(Token, Token)>
+    signal_handles: Option<(MsgMatch, MsgMatch)>
 }
 impl DBusConnections{
     /// Create new struct with a connection to the system bus
@@ -187,7 +187,7 @@ impl DBusConnections{
                 if let Ok(Some(waker)) = waker_copy.lock().map(|mut guard| guard.take()) {waker.wake();}
                 true
             });
-        data.lock().unwrap().signal_handles = Some((incoming_signal.token(), incoming_signal2.token()));
+        data.lock().unwrap().signal_handles = Some((incoming_signal, incoming_signal2));
         let mut new_sessions: HashSet<(String, u32)> = HashSet::new();
         let mut new_session_info: HashMap<String, (String, dbus::Path)> = HashMap::new();
         let handle = tokio::task::spawn(async move {loop{
