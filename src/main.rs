@@ -4,7 +4,7 @@ pub mod system_setup;
 
 use dbus_manager::{DBusConnections, DBusError};
 use system_setup::{create_xml, gpu::{GpuSetupError, GpuSetupState}, revert_performance_enhancements, PerformanceState, SetupError};
-use tokio::task::LocalSet;
+use tokio::task::{LocalSet, JoinHandle};
 use virtual_mouse::{MouseError, MouseState};
 use std::{env::args, sync::{Arc, Mutex}, time::Duration};
 use nix::unistd::Uid;
@@ -76,8 +76,7 @@ async fn main() -> Result<(), AppError>{
                 return Err(AppError::AppWasNotRunAsRoot);
             }
             let mut ss = SystemState::new().map_err(|err| AppError::DBusError(err))?;
-            let local_set = LocalSet::new();
-            let result = local_set.run_until(root_app(&mut ss, default, arguments[1].to_owned())).await;
+            let result = root_app(&mut ss, default, arguments[1].to_owned()).await;
             println!("Finished, with result: {:?}", result);
             println!("Starting Cleanup");
             cleanup(ss).await;
@@ -139,8 +138,15 @@ async fn root_app(ss: &mut SystemState, vm_type: LaunchConfig, mouse_path: Strin
     println!("Setting up mouse session handler");
     ss.mouse.session_handle = Some(mouse_manager.setup_session_handler(ss).await.map_err(|err| AppError::FailedToSetupMouseSessionHandler(err))?);
     println!("Spawning mouse update loop");
-    let mouse_handle = mouse_manager.spawn_update_loop();
-    
+    let local_set = LocalSet::new();
+    let mouse_update_future = local_set.run_until(mouse_manager.update_loop());
+    let rest_of_app_future = root_app_v2(vm_type, output_id, ss, session_handle);
+    tokio::select! {
+        result = mouse_update_future => {result.map_err(|err| AppError::MouseUpdateFailed(err))},
+        result = rest_of_app_future => {result}
+    }    
+}
+async fn root_app_v2(vm_type: LaunchConfig, output_id: u32, ss: &mut SystemState, session_handle: JoinHandle<()>) -> Result<(), AppError>{
     // finish xml
     println!("Finishing and writing vm xml");
     let xml_path = create_xml(vm_type.clone(), output_id).map_err(|err| AppError::FailedToCreateXml(err))?;
@@ -159,7 +165,6 @@ async fn root_app(ss: &mut SystemState, vm_type: LaunchConfig, mouse_path: Strin
     let _ = handle.await;
 
     session_handle.abort();
-    mouse_handle.abort();
     viewer_handle.abort();
 
     Ok(())

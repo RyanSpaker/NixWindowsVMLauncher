@@ -62,15 +62,14 @@ impl ToString for DBusError{
 /// Represents a connection to a dbus server
 #[derive(Clone)]
 pub struct Connection{
-    pub conn: Arc<SyncConnection>,
-    pub handle: Arc<Mutex<Box<JoinHandle<IOResourceError>>>>
+    pub conn: Arc<SyncConnection>
 }
 impl Connection{
     pub fn new_system() -> Result<Self, DBusError>{
         let (r, conn) = dbus_tokio::connection::new_system_sync()
             .map_err(|err| DBusError::FailedToConnectToSystemBus(err))?;
-        let handle = Arc::new(Mutex::new(Box::new(tokio::spawn(r))));
-        Ok(Self{conn, handle})
+        tokio::spawn(r);
+        Ok(Self{conn})
     }
     pub async fn new_channel<A: AsRef<str>>(uid: u32, addr: A) -> Result<Self, DBusError> {
         users::switch::set_effective_uid(uid).map_err(|err| DBusError::FailedToSetEUID(uid, err))?;
@@ -90,13 +89,8 @@ impl Connection{
         users::switch::set_effective_uid(0).map_err(|err| DBusError::FailedToSetEUID(0, err))?;
         let (r, conn) = dbus_tokio::connection::from_channel(channel)
             .map_err(|err| DBusError::FailedToConnectToUserBus(uid, err))?;
-        let handle = Arc::new(Mutex::new(Box::new(tokio::spawn(r))));
-        Ok(Self{conn, handle})
-    }
-    pub async fn check(&mut self) -> Result<(), IOResourceError> {
-        if self.handle.lock().unwrap().is_finished() {
-            Err(self.handle.lock().unwrap().as_mut().await.unwrap())
-        }else {Ok(())}
+        tokio::spawn(r);
+        Ok(Self{conn})
     }
     pub async fn method_call<'a, D, P, I, M, A, R>(&self, dest: D, path: P, interface: I, method: M, args: A) -> Result<R, dbus::Error> 
     where 
@@ -194,11 +188,11 @@ impl DBusConnections{
                 true
             });
         data.lock().unwrap().signal_handles = Some((incoming_signal.token(), incoming_signal2.token()));
-
         let mut new_sessions: HashSet<(String, u32)> = HashSet::new();
         let mut new_session_info: HashMap<String, (String, dbus::Path)> = HashMap::new();
-        let handle = tokio::task::spawn_local(async move {loop{
+        let handle = tokio::task::spawn(async move {loop{
             // wait either 5 seconds, or until a signal is sent on login
+            println!("Waiting for new sessions");
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {},
                 _ = NewSignalFuture::new(waker.clone()) => {}
@@ -243,14 +237,13 @@ impl DBusConnections{
             // if there is no work to be done on data, continue
             if new_sessions.len() == 0 && old_sessions.len() == 0 {continue;}
             
-            let mut data_guard = data.lock().map_err(|err| DBusError::FailedToAqcuireConnectionsLock(err.to_string())).unwrap();
             let mut wake = false;
             // create new sessions
             for (path, uid) in new_sessions.iter(){
                 // grab display from login1
                 let (display, user_path) = new_session_info.get(path).unwrap().to_owned();
                 // connect user bus if needed
-                if !data_guard.users.contains_key(&uid) {
+                if !data.lock().unwrap().users.contains_key(&uid) {
                     let temp_proxy = dbus::nonblock::Proxy::new(
                         "org.freedesktop.login1", 
                         user_path, 
@@ -261,12 +254,12 @@ impl DBusConnections{
                         .map_err(|err| DBusError::FailedToGetUserRuntimePath(path.to_string(), err)).unwrap();
                     let addr = runtime_path.to_string() + "/bus";
                     let connection = Connection::new_channel(uid.clone(), addr).await.unwrap();
-                    data_guard.users.insert(uid.clone(), (HashSet::from_iter([path.clone()]), connection));
+                    data.lock().unwrap().users.insert(uid.clone(), (HashSet::from_iter([path.clone()]), connection));
                 }
                 // get xauthority if display exists
                 let mut xauthority_path = "".to_string();
                 if display != "" {
-                    let (_, connection) = data_guard.users.get_mut(&uid).unwrap();
+                    let connection = data.lock().unwrap().users.get_mut(&uid).unwrap().1.clone();
                     let env: Vec<String> = connection.property_get(
                         "org.freedesktop.systemd1", 
                         "/org/freedesktop/systemd1", 
@@ -276,36 +269,35 @@ impl DBusConnections{
                     if let Some(var) = env.iter().find(|var| var.starts_with("XAUTHORITY=")) {
                         xauthority_path = var.strip_prefix("XAUTHORITY=").unwrap().to_string();
                     }
-                    data_guard.displays.insert(path.to_owned());
+                    data.lock().unwrap().displays.insert(path.to_owned());
                     wake = true;
                 }
                 // place everything in the object
                 let session = Session{path: path.to_owned(), display, xauthority_path, uid: uid.clone()};
                 println!("Found new session at path {:?}, : {:?}", path, session);
-                data_guard.sessions.insert(path.to_owned(), session);
+                data.lock().unwrap().sessions.insert(path.to_owned(), session);
             }
             // kill old sessions
             for (path, uid) in old_sessions.into_iter() {
-                data_guard.sessions.remove(&path);
-                if data_guard.displays.remove(&path) {
+                data.lock().unwrap().sessions.remove(&path);
+                if data.lock().unwrap().displays.remove(&path) {
                     wake = true;
                 }
                 let mut delete_user = false;
-                if let Some(user) = data_guard.users.get_mut(&uid) {
+                if let Some(user) = data.lock().unwrap().users.get_mut(&uid) {
                     user.0.remove(&path);
                     if user.0.is_empty() {
                         delete_user = true;
-                        user.1.handle.lock().unwrap().abort();
                     }
                 }
-                if delete_user {data_guard.users.remove(&uid);}
+                if delete_user {data.lock().unwrap().users.remove(&uid);}
                 let session = (path, uid);
                 invalid_sessions.remove(&session);
                 valid_sessions.remove(&session);
                 known_sessions.remove(&session);
             }
             // wake up display change futures
-            if wake {data_guard.display_change_wakers.drain(..).for_each(|waker| waker.wake());}
+            if wake {data.lock().unwrap().display_change_wakers.drain(..).for_each(|waker| waker.wake());}
         }});
         return Ok(handle);
     }
@@ -319,7 +311,6 @@ impl DBusConnections{
         A: AppendAll,
         R: ReadAll + 'static
     {
-        self.system.check().await.map_err(|err| DBusError::SystemBusLost(err))?;
         self.system.method_call(dest, path, interface, method, args).await.map_err(|err| DBusError::MethodCallError(err))
     }
     /// Get a property on the system bus
@@ -331,7 +322,6 @@ impl DBusConnections{
         N: AsRef<str>,
         R: for<'b> dbus::arg::Get<'b> + 'static
     {
-        self.system.check().await.map_err(|err| DBusError::SystemBusLost(err))?;
         self.system.property_get(dest, path, interface, property).await.map_err(|err| DBusError::PropertyQueryError(err))
     }
     /// Call a method on the user busses
@@ -344,7 +334,6 @@ impl DBusConnections{
         A: AppendAll + Clone,
         R: ReadAll + 'static
     {
-        self.check_users().await?;
         let mut results = HashMap::new();
         for (uid, (_, connection)) in self.users.iter() {
             let result = connection.method_call(dest.clone(), path.clone(), interface.clone(), method.clone(), args.clone()).await
@@ -362,7 +351,6 @@ impl DBusConnections{
         N: AsRef<str>,
         R: for<'b> dbus::arg::Get<'b> + 'static
     {
-        self.check_users().await?;
         let mut results = HashMap::new();
         for (uid, (_, connection)) in self.users.iter(){
             let result = connection.property_get(dest.clone(), path.clone(), interface.as_ref(), property.as_ref()).await
@@ -370,13 +358,6 @@ impl DBusConnections{
             results.insert(*uid, result);
         }
         Ok(results)
-    }
-    /// Checks all user connections to see if they are still valid.
-    pub async fn check_users(&mut self) -> Result<(), DBusError>{
-        for (uid, (_, connection)) in self.users.iter_mut(){
-            connection.check().await.map_err(|err| DBusError::UserBusLost(*uid, err))?;
-        }
-        Ok(())
     }
 }
 
@@ -431,8 +412,7 @@ impl DBusManager for Arc<Mutex<DBusConnections>> {
         A: AppendAll,
         R: ReadAll + 'static
     {
-        let mut system = self.lock().unwrap().system.clone();
-        system.check().await.map_err(|err| DBusError::SystemBusLost(err))?;
+        let system = self.lock().unwrap().system.clone();
         system.method_call(dest, path, interface, method, args).await.map_err(|err| DBusError::MethodCallError(err))
     }
     /// Get a property on the system bus
@@ -444,8 +424,7 @@ impl DBusManager for Arc<Mutex<DBusConnections>> {
         N: AsRef<str>,
         R: for<'b> dbus::arg::Get<'b> + 'static
     {
-        let mut system = self.lock().unwrap().system.clone();
-        system.check().await.map_err(|err| DBusError::SystemBusLost(err))?;
+        let system = self.lock().unwrap().system.clone();
         system.property_get(dest, path, interface, property).await.map_err(|err| DBusError::PropertyQueryError(err))
     }
     /// Call a method on the user busses
@@ -460,8 +439,7 @@ impl DBusManager for Arc<Mutex<DBusConnections>> {
     {
         let users = self.lock().unwrap().users.clone();
         let mut results = HashMap::new();
-        for (uid, (_, mut connection)) in users.into_iter() {
-            if let Err(_) = connection.check().await {continue;}
+        for (uid, (_, connection)) in users.into_iter() {
             let result = connection.method_call(dest.clone(), path.clone(), interface.clone(), method.clone(), args.clone()).await
                 .map_err(|err| DBusError::UserMethodCallError(uid, err))?;
             results.insert(uid, result);
@@ -479,8 +457,7 @@ impl DBusManager for Arc<Mutex<DBusConnections>> {
     {
         let users = self.lock().unwrap().users.clone();
         let mut results = HashMap::new();
-        for (uid, (_, mut connection)) in users.into_iter(){
-            if let Err(_) = connection.check().await {continue;}
+        for (uid, (_, connection)) in users.into_iter(){
             let result = connection.property_get(dest.clone(), path.clone(), interface.as_ref(), property.as_ref()).await
                 .map_err(|err| DBusError::UserPropertyQueryError(uid, err))?;
             results.insert(uid, result);
