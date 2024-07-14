@@ -528,14 +528,14 @@ impl Future for DisplaySessionChangeFuture{
 
 pub fn setup_viewer_session_handler(dbus: Arc<Mutex<DBusConnections>>, vm_type: LaunchConfig) -> Result<JoinHandle<()>, DBusError> {
     let mut known_sessions: HashSet<Session> = HashSet::new();
-    let mut children: HashMap<String, Child> = HashMap::new();
+    let mut children: HashMap<String, Result<Child, std::io::Error>> = HashMap::new();
     Ok(tokio::task::spawn(async move {loop{
         let known_displays = known_sessions.iter().map(|sess| sess.path.clone()).collect::<HashSet<String>>();
         let sessions = DisplaySessionChangeFuture{dbus: dbus.clone(), known_displays: known_displays}.await;
         let new_sessions = sessions.difference(&known_sessions).collect::<Vec<&Session>>();
         let old_sessions = known_sessions.difference(&sessions).collect::<Vec<&Session>>();
         for display in old_sessions{
-            if let Some(mut child) = children.remove(&display.path) {
+            if let Some(Ok(mut child)) = children.remove(&display.path) {
                 let _ = child.start_kill();
             }
         }
@@ -563,7 +563,7 @@ pub fn setup_viewer_session_handler(dbus: Arc<Mutex<DBusConnections>>, vm_type: 
                         .stdout(log).stderr(err_log).spawn()
                 },
                 _ => panic!("How did we get here?")
-            }.unwrap();
+            };
             children.insert(session.path.to_owned(), child);
         }
         known_sessions = sessions;
