@@ -253,7 +253,7 @@ impl DBusConnections{
                     );
                     let runtime_path = temp_proxy.get::<String>("org.freedesktop.login1.User", "RuntimePath").await
                         .map_err(|err| DBusError::FailedToGetUserRuntimePath(path.to_string(), err)).unwrap();
-                    let addr = runtime_path.to_string() + "/bus";
+                    let addr = "unix:path=".to_string() + &runtime_path + "/bus";
                     let connection = Connection::new_channel(uid.clone(), addr).await.unwrap();
                     data.lock().unwrap().users.insert(uid.clone(), (HashSet::from_iter([path.clone()]), connection));
                 }
