@@ -62,10 +62,10 @@
             rustc.llvmPackages.bintools
             (wrapBintoolsWith { bintools = mold; })
           ];
-          libraries = pkgs.lib.makeLibraryPath [pkgs.libinput pkgs.dbus];
+          libraries = pkgs.lib.makeLibraryPath [pkgs.libinput pkgs.dbus pkgs.systemd];
           postInstall = ''
-            mv $out/bin/nixos-windows-launcher $out/bin/.nixos-windows-launcher
-            makeWrapper $out/bin/.nixos-windows-launcher $out/bin/nixos-windows-launcher --set LD_LIBRARY_PATH ${libraries} --set PATH ${pkgs.lib.makeBinPath (with pkgs; [ kmod libvirt xorg.xinput looking-glass-client virt-viewer ps ])}
+            mv $out/bin/windows-launcher $out/src/.windows-launcher
+            makeWrapper $out/src/.windows-launcher $out/bin/windows-launcher --set LD_LIBRARY_PATH ${libraries} --set PATH ${pkgs.lib.makeBinPath (with pkgs; [ kmod libvirt systemd looking-glass-client virt-viewer ps ])}
           '';
         };
       }
