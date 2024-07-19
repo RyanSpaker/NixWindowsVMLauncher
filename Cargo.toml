@@ -1,5 +1,5 @@
 [package]
-name = "nixos-windows-launcher"
+name = "windows-launcher"
 version = "0.1.0"
 edition = "2021"
 

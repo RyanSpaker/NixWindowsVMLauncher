@@ -447,22 +447,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nixos-windows-launcher"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "dbus",
- "dbus-crossroads",
- "dbus-tokio",
- "evdev",
- "futures",
- "input",
- "nix 0.29.0",
- "tokio",
- "users",
-]
-
-[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -800,6 +784,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33ab640c8d7e35bf8ba19b884ba838ceb4fba93a4e8c65a9059d08afcfc683d9"
 dependencies = [
  "windows-targets 0.52.5",
+]
+
+[[package]]
+name = "windows-launcher"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbus",
+ "dbus-crossroads",
+ "dbus-tokio",
+ "evdev",
+ "futures",
+ "input",
+ "nix 0.29.0",
+ "tokio",
+ "users",
 ]
 
 [[package]]
