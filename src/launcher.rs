@@ -474,23 +474,35 @@ pub async fn rc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<L
     }
     if state.pw_stopped.load(Ordering::Relaxed) {
         println!("Starting Pipewire");
-        unsafe{for user in users::all_users() {
-            let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user.uid()), "start", "pipewire.socket"])
-                .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
-            let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user.uid()), "start", "pipewire-pulse.socket"])
-                .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
-        }}
+        let login_proxy = Proxy::new("org.freedesktop.login1", "/org/freedesktop/login1", Duration::from_secs(2), conn.clone());
+        match login_proxy.method_call::<(Vec<(u32, String, dbus::Path)>,), _, _, _>("org.freedesktop.login1.Manager", "ListUsers", ()).await{
+            Ok((users,)) => {
+                for (user, _, _) in users.iter(){
+                    let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user), "start", "pipewire.socket"])
+                        .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
+                    let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user), "start", "pipewire-pulse.socket"])
+                        .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
+                }
+            },
+            Err(err) => {errors.push(LauncherError::FailedToGetUsers(err));}
+        }
         reset_pw = false;
     }
     // if we did any work to reconnect the gpu, restart dp
     if reset_pw {
         println!("Resetting Pipewire");
-        unsafe{for user in users::all_users() {
-            let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user.uid()), "restart", "pipewire.socket"])
-                .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
-            let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user.uid()), "restart", "pipewire-pulse.socket"])
-                .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
-        }}
+        let login_proxy = Proxy::new("org.freedesktop.login1", "/org/freedesktop/login1", Duration::from_secs(2), conn.clone());
+        match login_proxy.method_call::<(Vec<(u32, String, dbus::Path)>,), _, _, _>("org.freedesktop.login1.Manager", "ListUsers", ()).await{
+            Ok((users,)) => {
+                for (user, _, _) in users.iter(){
+                    let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user), "restart", "pipewire.socket"])
+                        .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
+                    let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user), "restart", "pipewire-pulse.socket"])
+                        .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
+                }
+            },
+            Err(err) => {errors.push(LauncherError::FailedToGetUsers(err));}
+        }
     }
     if reset_dp {
         println!("Resetting Display Manager");
