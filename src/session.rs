@@ -19,7 +19,8 @@ pub enum SessionError{
     LookingGlassFailed,
     FailedToLaunchVirtViewer(std::io::Error),
     VirtViewerFailed,
-    FailedtoCreateLogFile(std::io::Error)
+    FailedtoCreateLogFile(std::io::Error),
+    ServerError(dbus::Error)
 }
 impl Display for SessionError{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -31,7 +32,8 @@ impl Display for SessionError{
             Self::LookingGlassFailed => format!("Looking glass returned with error"),
             Self::FailedToLaunchVirtViewer(err) => format!("Could not launch virt-viewer: {}", *err),
             Self::VirtViewerFailed => format!("virt-viewer returned with error"),
-            Self::FailedtoCreateLogFile(err) => format!("Could not create the log files: {}", *err)
+            Self::FailedtoCreateLogFile(err) => format!("Could not create the log files: {}", *err),
+            Self::ServerError(err) => format!("Server return error: {}", *err)
         });
         Ok(())
     }
@@ -40,18 +42,22 @@ impl Error for SessionError{}
 
 pub async fn session()->Result<(), SessionError> {
     if users::get_current_groupname().is_some_and(|name| name.eq_ignore_ascii_case("sddm")) {return Ok(());}
-    let (r, conn) = dbus_tokio::connection::new_session_sync()
+    let (r, conn) = dbus_tokio::connection::new_system_sync()
         .map_err(|err| SessionError::FailedToConnectToSystemBus(err))?;
     let handle = tokio::spawn(r);
     let proxy = Proxy::new("org.cws.WindowsLauncher", "/org/cws/WindowsLauncher", Duration::from_secs(30), conn.clone());
-    let Ok((launch_type,)): Result<(String,), dbus::Error> = proxy.method_call("org.cws.WindowsLauncher.Manager", "UserConnected", ()).await else {
-        println!("Unable to talk to server. assuming success");
-        return Ok(());
+    let launch_type = match proxy.method_call::<(String,), _, _, _>("org.cws.WindowsLauncher.Manager", "UserConnected", ()).await {
+        Err(err) => {
+            return Err(SessionError::ServerError(err));
+        },
+        Ok((launch_type,)) => {
+            if launch_type == "" {
+                println!("Got empty launch type, vm is not running");
+                return Ok(());
+            }
+            launch_type
+        }
     };
-    if launch_type == "" {
-        println!("Got empty launch type, vm is not running");
-        return Ok(());
-    }
     println!("Got vm type of: {}", launch_type);
     let log_file = File::create(format!("/var/log/windows/viewer/log-{}.txt", chrono::Local::now().to_string()))
         .map_err(|err| SessionError::FailedtoCreateLogFile(err))?;
