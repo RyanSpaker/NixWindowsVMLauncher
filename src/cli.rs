@@ -74,7 +74,7 @@ pub async fn start_spice(path: String) -> Result<(), CliError> {
 // start the user session
 pub async fn open() -> Result<(), CliError> {
     let (conn, h) = get_session_conn()?;
-    let proxy = Proxy::new("org.freedesktop.systemd1", "/org/freedesktop.systemd1", Duration::from_secs(2), conn.clone());
+    let proxy = Proxy::new("org.freedesktop.systemd1", "/org/freedesktop/systemd1", Duration::from_secs(2), conn.clone());
     let _: (Path,) = proxy.method_call("org.freedesktop.systemd1.Manager", "StartUnit", ("windows-launcher.service", "replace")).await
         .map_err(|err| CliError::FailedToStartUserService(err))?;
     h.abort();

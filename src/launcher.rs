@@ -135,12 +135,15 @@ pub async fn launcher(data: Arc<Mutex<ServerData>>, conn: Arc<SyncConnection>) -
     let system_state = Arc::new(SystemState::default());
     loop{
         // wait for vm to be requested
+        println!("Waiting for vm launch to be requested...");
         if let Err(err) = (VmLaunchFuture{data: data.clone()}).await {return LauncherError::ServerError(err);};
         // do work
+        println!("Spawning VM Launch");
         let handle = tokio::spawn(launch_vm(data.clone(), system_state.clone(), conn.clone()));
         // wait for work to finish, or shutdown signal
         tokio::select! {
             result = handle => {
+                println!("VM Launch Finished");
                 if let Ok(Err(err)) = result {  
                     let _ = cleanup(system_state, conn).await;
                     return err;
@@ -148,10 +151,12 @@ pub async fn launcher(data: Arc<Mutex<ServerData>>, conn: Arc<SyncConnection>) -
                 if let Ok(mut guard) = data.lock() {guard.vm_state.set(VmState::ShuttingDown);}
             },
             result = VmShutdownFuture{data: data.clone()} => {
+                println!("Shutdown Interrupted Vm Launch");
                 if let Err(err) = result {return LauncherError::ServerError(err);}
             }
         }
         // cleanup
+        println!("Cleaning up...");
         let mut errors = cleanup(system_state.clone(), conn.clone()).await;
         if errors.len() > 0 {return errors.remove(0);};
         let mut guard = match data.lock() {Ok(guard) => guard, _ => {return LauncherError::FailedToLockData;}};
@@ -165,18 +170,23 @@ pub async fn launch_vm(data: Arc<Mutex<ServerData>>, state: Arc<SystemState>, co
     let vm_type = data.lock().map_err(|_| LauncherError::FailedToLockData)?.vm_type.clone();
     // if type is lg, we need to dc the gpu
     if let VmType::LookingGlass = vm_type {
+        println!("Disconnecting GPU");
         dc_gpu(state.clone(), conn.clone()).await?;
     }
     // we need to wait for a user session to connect before continuing
+    println!("Waiting for user connection");
     UserConnectedFuture{data: data.clone()}.await.map_err(|err| LauncherError::ServerError(err))?;
     // setup the pc
+    println!("Setting up PC...");
     let mouse_path = data.lock().map_err(|_|LauncherError::FailedToLockData)?.mouse_path.clone();
     setup_pc(state.clone(), conn.clone(), mouse_path, vm_type.clone()).await?;
     // launch vm
+    println!("Starting VM");
     start_vm(state.clone()).await?;
     // inform users that state has changed
     if let Ok(mut guard) = data.lock() {guard.vm_state.set(VmState::Launched);} else {return Err(LauncherError::FailedToLockData);}
     // wait for vm to shutdown
+    println!("Waiting for vm to close");
     wait_on_vm(state.clone()).await?;
     Ok(())
 }
@@ -186,10 +196,12 @@ pub async fn cleanup(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<
     let mut errors: Vec<LauncherError> = vec![];
     // make sure vm is shutdown
     if state.vm_launched.load(Ordering::Relaxed) {
+        println!("Shutting Down VM");
         if let Err(err) = tokio::process::Command::new("virsh").args(["-cqemu:///windows", "shutdown", "windows"]).status().await {
             errors.push(LauncherError::FailedToShutdownVm(err));
         };
         let mut success = false;
+        println!("Waiting for vm to shutdown");
         for _ in 0..30 {
             if !tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"])
                 .stderr(Stdio::null()).stdout(Stdio::null()).output()
@@ -202,6 +214,7 @@ pub async fn cleanup(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<
             }
         }
         if !success {
+            println!("Destroying VM");
             if let Err(err) = tokio::process::Command::new("virsh").args(["-cqemu:///windows", "destroy", "windows"]).status().await {
                 errors.push(LauncherError::FailedToDestroyVm(err));
             }
@@ -210,11 +223,13 @@ pub async fn cleanup(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<
     // undo state changes
     // stop virtual mouse
     if state.virtual_mouse_create.load(Ordering::Relaxed) {
+        println!("Stopping Virtual Mouse");
         let proxy = Proxy::new("org.cws.VirtualMouse", "/org/cws/VirtualMouse", Duration::from_secs(2), conn.clone());
         if let Err(err) = proxy.method_call::<(String, String, String), _, _, _>("org.cws.VirtualMouse.Manager", "DestroyMouse", ("WindowsMouse",)).await {
             errors.push(LauncherError::FailedToStopVirtualMouse(err));
         }
     }
+    println!("Undoing governor and cpu limiting");
     // undo performance governor
     if state.performance_governor.load(Ordering::Relaxed) {
         match Path::new("/sys/devices/system/cpu/").read_dir() {
@@ -265,6 +280,7 @@ pub async fn cleanup(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<
         ).await {errors.push(LauncherError::FailedToSetCPUs(err));}
     }
     // undo gpu disconnection
+    println!("Reconnecting gpu");
     errors.extend(rc_gpu(state.clone(), conn.clone()).await);
     // revert state to default
     state.revert();
@@ -274,11 +290,13 @@ pub async fn cleanup(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<
 /// Disconnects the gpu from the system
 pub async fn dc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Result<(), LauncherError>{
     // stop display manager
+    println!("Stopping Display Manager");
     let proxy = Proxy::new("org.freedesktop.systemd1", "/org/freedesktop/systemd1", Duration::from_secs(2), conn.clone());
     let _: (dbus::Path,) = proxy.method_call("org.freedesktop.systemd1.Manager", "StopUnit", ("display-manager.service", "replace")).await
         .map_err(|err| LauncherError::FailedToStopDP(err))?;
     state.dp_stopped.store(true, Ordering::Relaxed);
     // stop pipewire
+    println!("Stopping Pipewire");
     unsafe{for user in users::all_users() {
         let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user.uid()), "stop", "pipewire.socket"])
             .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
@@ -287,6 +305,7 @@ pub async fn dc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Resul
     }}
     state.pw_stopped.store(true, Ordering::Release);
     // wait for processes to close
+    println!("Waiting for processes to close");
     let mut success = false;
     for _ in 0..20{
         let output = tokio::process::Command::new("ps").args(["-u", "root"]).stderr(Stdio::null()).stdout(Stdio::piped()).output().await
@@ -300,6 +319,7 @@ pub async fn dc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Resul
     }
     if !success {return Err(LauncherError::ProcessesDidNotExit);}
     // unload nvidia
+    println!("Unloading Nvidia Modules");
     let out = tokio::process::Command::new("modprobe").args(["-f", "-r", "nvidia_uvm"]).output().await
         .map_err(|err| LauncherError::FailedToUnloadKernelModule("nvidia_uvm".to_string(), err))?;
     if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
@@ -325,6 +345,7 @@ pub async fn dc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Resul
     }
     state.nvidia_unloaded.3.store(true, Ordering::Relaxed);
     // disconnect
+    println!("Disconnecting GPU");
     let _ = tokio::process::Command::new("virsh").args(["nodedev-detach", "pci_0000_01_00_0"]).status().await
         .map_err(|err| LauncherError::FailedToDisconnectGPU("pci_0000_01_00_0".to_string(), err))?;
     state.gpu_dettached.0.store(true, Ordering::Relaxed);
@@ -332,10 +353,12 @@ pub async fn dc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Resul
         .map_err(|err| LauncherError::FailedToDisconnectGPU("pci_0000_01_00_1".to_string(), err))?;
     state.gpu_dettached.1.store(true, Ordering::Relaxed);
     // load vfio
+    println!("Loading VFIO");
     let _ = tokio::process::Command::new("modprobe").args(["vfio-pci"]).status().await
         .map_err(|err| LauncherError::FailedToLoadKernelModule("vfio-pci".to_string(), err))?;
     state.vfio_loaded.store(true, Ordering::Relaxed);
     // restart pipewire
+    println!("Starting Pipewire");
     unsafe{for user in users::all_users() {
         let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user.uid()), "start", "pipewire.socket"])
             .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
@@ -344,6 +367,7 @@ pub async fn dc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Resul
     }}
     state.pw_stopped.store(false, Ordering::Relaxed);
     // restart display manager
+    println!("Starting Display Manager");
     let _: (dbus::Path,) = proxy.method_call("org.freedesktop.systemd1.Manager", "StartUnit", ("display-manager.service", "replace")).await
         .map_err(|err| LauncherError::FailedToStartDP(err))?;
     state.dp_stopped.store(false, Ordering::Relaxed);
@@ -357,6 +381,7 @@ pub async fn rc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<L
     // do any work to reconnect the gpu
     // unload vfio
     if state.vfio_loaded.load(Ordering::Relaxed) {
+        println!("Unloading vfio");
         match tokio::process::Command::new("modprobe").args(["-f", "-r", "vfio-pci"]).output().await {
             Err(err) => {errors.push(LauncherError::FailedToUnloadKernelModule("vfio-pci".to_string(), err));},
             Ok(out) => {
@@ -369,12 +394,14 @@ pub async fn rc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<L
     }
     // reattach gpu
     if state.gpu_dettached.0.load(Ordering::Relaxed) {
+        println!("Reconnecting gpu 0");
         if let Err(err) = tokio::process::Command::new("virsh").args(["nodedev-reattach", "pci_0000_01_00_0"]).status().await{
             errors.push(LauncherError::FailedToConnectGPU("pci_0000_01_00_0".to_string(), err));
         }
         reset_dp = true; reset_pw = true;
     }
     if state.gpu_dettached.1.load(Ordering::Relaxed) {
+        println!("Reconnecting gpu 1");
         if let Err(err) = tokio::process::Command::new("virsh").args(["nodedev-reattach", "pci_0000_01_00_1"]).status().await{
             errors.push(LauncherError::FailedToConnectGPU("pci_0000_01_00_1".to_string(), err));
         }
@@ -382,24 +409,28 @@ pub async fn rc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<L
     }
     // load nvidia
     if state.nvidia_unloaded.3.load(Ordering::Relaxed) {
+        println!("Loading nvidia");
         if let Err(err) = tokio::process::Command::new("modprobe").args(["nvidia"]).status().await{
             errors.push(LauncherError::FailedToLoadKernelModule("nvidia".to_string(), err));
         }
         reset_dp = true; reset_pw = true;
     }
     if state.nvidia_unloaded.2.load(Ordering::Relaxed) {
+        println!("Loading nvidia");
         if let Err(err) = tokio::process::Command::new("modprobe").args(["nvidia_modeset"]).status().await{
             errors.push(LauncherError::FailedToLoadKernelModule("nvidia_modeset".to_string(), err));
         }
         reset_dp = true; reset_pw = true;
     }
     if state.nvidia_unloaded.1.load(Ordering::Relaxed) {
+        println!("Loading nvidia");
         if let Err(err) = tokio::process::Command::new("modprobe").args(["nvidia_drm"]).status().await{
             errors.push(LauncherError::FailedToLoadKernelModule("nvidia_drm".to_string(), err));
         }
         reset_dp = true; reset_pw = true;
     }
     if state.nvidia_unloaded.0.load(Ordering::Relaxed) {
+        println!("Loading nvidia");
         if let Err(err) = tokio::process::Command::new("modprobe").args(["nvidia_uvm"]).status().await{
             errors.push(LauncherError::FailedToLoadKernelModule("nvidia_uvm".to_string(), err));
         }
@@ -407,6 +438,7 @@ pub async fn rc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<L
     }
     // if the dp or pw is not started, start it
     if state.dp_stopped.load(Ordering::Relaxed) {
+        println!("Starting Display Manager");
         let proxy = Proxy::new("org.freedesktop.systemd1", "/org/freedesktop/systemd1", Duration::from_secs(2), conn.clone());
         if let Err(err) = proxy.method_call::<(dbus::Path,), _, _, _>("org.freedesktop.systemd1.Manager", "StartUnit", ("display-manager.service", "replace")).await{
             errors.push(LauncherError::FailedToStartDP(err));
@@ -414,6 +446,7 @@ pub async fn rc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<L
         reset_dp = false;
     }
     if state.pw_stopped.load(Ordering::Relaxed) {
+        println!("Starting Pipewire");
         unsafe{for user in users::all_users() {
             let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user.uid()), "start", "pipewire.socket"])
                 .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
@@ -424,6 +457,7 @@ pub async fn rc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<L
     }
     // if we did any work to reconnect the gpu, restart dp
     if reset_pw {
+        println!("Resetting Pipewire");
         unsafe{for user in users::all_users() {
             let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user.uid()), "restart", "pipewire.socket"])
                 .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
@@ -432,6 +466,7 @@ pub async fn rc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<L
         }}
     }
     if reset_dp {
+        println!("Resetting Display Manager");
         let proxy = Proxy::new("org.freedesktop.systemd1", "/org/freedesktop/systemd1", Duration::from_secs(2), conn.clone());
         if let Err(err) = proxy.method_call::<(dbus::Path,), _, _, _>("org.freedesktop.systemd1.Manager", "RestartUnit", ("display-manager.service", "replace")).await{
             errors.push(LauncherError::FailedToRestartDP(err));

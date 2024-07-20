@@ -44,8 +44,15 @@ pub async fn session()->Result<(), SessionError> {
         .map_err(|err| SessionError::FailedToConnectToSystemBus(err))?;
     let handle = tokio::spawn(r);
     let proxy = Proxy::new("org.cws.WindowsLauncher", "/org/cws/WindowsLauncher", Duration::from_secs(30), conn.clone());
-    let Ok((launch_type,)): Result<(String,), dbus::Error> = proxy.method_call("org.cws.WindowsLauncher.Manager", "UserConnected", ()).await else {return Ok(());};
-    if launch_type == "" {return Ok(());}
+    let Ok((launch_type,)): Result<(String,), dbus::Error> = proxy.method_call("org.cws.WindowsLauncher.Manager", "UserConnected", ()).await else {
+        println!("Unable to talk to server. assuming success");
+        return Ok(());
+    };
+    if launch_type == "" {
+        println!("Got empty launch type, vm is not running");
+        return Ok(());
+    }
+    println!("Got vm type of: {}", launch_type);
     let log_file = File::create(format!("/var/log/windows/viewer/log-{}.txt", chrono::Local::now().to_string()))
         .map_err(|err| SessionError::FailedtoCreateLogFile(err))?;
     let log = Stdio::from(log_file.try_clone().map_err(|err| SessionError::FailedtoCreateLogFile(err))?);

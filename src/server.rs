@@ -188,6 +188,7 @@ pub async fn define_server(conn: Arc<SyncConnection>) -> Result<Arc<Mutex<Server
         // Returns "" if the vm is not being launched
         b.method_with_cr_async("UserConnected", (), ("VmType",), 
         |mut ctx, cr, _: ()| {
+            println!("User Connected!");
             let object = cr.data_mut::<Arc<Mutex<ServerData>>>(&"/org/cws/WindowsLauncher".into()).cloned();
             async move {
                 let Some(data) = object else {return ctx.reply(Err(MethodErr::failed(&ServerError::FailedToFindServerData)));};
@@ -204,6 +205,7 @@ pub async fn define_server(conn: Arc<SyncConnection>) -> Result<Arc<Mutex<Server
         // returns when the vm is fully shutdown
         b.method_with_cr_async("Shutdown", (), (), 
         |mut ctx, cr, _: ()| {
+            println!("Shutdown Requested!");
             let object = cr.data_mut::<Arc<Mutex<ServerData>>>(&"/org/cws/WindowsLauncher".into()).cloned();
             async move {
                 let Some(data) = object else {return ctx.reply(Err(MethodErr::failed(&ServerError::FailedToFindServerData)));};
@@ -220,6 +222,7 @@ pub async fn define_server(conn: Arc<SyncConnection>) -> Result<Arc<Mutex<Server
         // returns the vm state and type
         b.method::<_, (String, String), _, _>("Query", (), ("VmState", "VmType"), 
         |_, data, _: ()| {
+            println!("Query Requested!");
             if let Ok(guard) = data.lock() {
                 Ok((guard.vm_state.get().to_string(), guard.vm_type.to_string()))
             }else {Ok(("None".to_string(), "Not Running".to_string()))}
@@ -227,6 +230,7 @@ pub async fn define_server(conn: Arc<SyncConnection>) -> Result<Arc<Mutex<Server
         // tells the server to launch looking glass, returns immediately
         b.method("LaunchLG", ("MousePath",), (), 
         |_, data, (path,): (String,)| {
+            println!("LG Launch Requested!");
             if let Ok(mut guard) = data.lock() {
                 match guard.vm_state.get() {
                     VmState::Inactive => {
@@ -245,6 +249,7 @@ pub async fn define_server(conn: Arc<SyncConnection>) -> Result<Arc<Mutex<Server
         // tells the server to launch spice. returns immediately
         b.method("LaunchSpice", ("MousePath",), (), 
         |_, data, (path,): (String,)| {
+            println!("Spice Launch Requested!");
             if let Ok(mut guard) = data.lock() {
                 match guard.vm_state.get() {
                     VmState::Inactive => {
