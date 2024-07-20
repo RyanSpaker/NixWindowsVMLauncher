@@ -63,7 +63,7 @@ pub async fn session()->Result<(), SessionError> {
         .map_err(|err| SessionError::FailedtoCreateLogFile(err))?;
     let log = Stdio::from(log_file.try_clone().map_err(|err| SessionError::FailedtoCreateLogFile(err))?);
     let log_err = Stdio::from(log_file);
-    if launch_type == "LG" {
+    if launch_type == "Looking Glass" {
         launch_lg(log, log_err).await?;
     }else if launch_type == "Spice" {
         launch_spice(log, log_err).await?;
