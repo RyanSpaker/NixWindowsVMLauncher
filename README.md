@@ -43,3 +43,7 @@ undo performance
 LG:
 
 Undoes setup
+
+
+
+launcher wait condition for vm is broken

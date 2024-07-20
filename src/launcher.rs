@@ -63,7 +63,9 @@ pub enum LauncherError{
     FailedToDestroyVm(std::io::Error),
     FailedToStopVirtualMouse(dbus::Error),
     FailedToConnectGPU(String, std::io::Error),
-    FailedToRestartDP(dbus::Error)
+    FailedToRestartDP(dbus::Error),
+    FailedToGetUsers(dbus::Error),
+    FailedToGetVmState(std::io::Error)
 }
 impl Display for LauncherError{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -90,7 +92,9 @@ impl Display for LauncherError{
             Self::FailedToDestroyVm(err) => format!("Failed to destroy the vm with virsh: {}", *err),
             Self::FailedToStopVirtualMouse(err) => format!("Failed to stop the virtual mouse: {}", *err),
             Self::FailedToConnectGPU(pci, err) => format!("Failed to reconnect gpu: {}, with err: {}", *pci, *err),
-            Self::FailedToRestartDP(err) => format!("Failed to restart display-manager.service: {}", *err)
+            Self::FailedToRestartDP(err) => format!("Failed to restart display-manager.service: {}", *err),
+            Self::FailedToGetUsers(err) => format!("Failed to get users from login1: {}", *err),
+            Self::FailedToGetVmState(err) => format!("failed to get vm state from virsh: {}", *err)
         });
         Ok(())
     }
@@ -203,14 +207,12 @@ pub async fn cleanup(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<
         let mut success = false;
         println!("Waiting for vm to shutdown");
         for _ in 0..30 {
-            if !tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"])
-                .stderr(Stdio::null()).stdout(Stdio::null()).output()
-                .await.is_ok_and(|output| output.status.success()) 
-            {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }else {
-                success = true;
-                break;
+            match tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"]).output().await {
+                Err(err) => {errors.push(LauncherError::FailedToGetVmState(err)); break;}
+                Ok(output) => {
+                    if !output.status.success() {success = true; break;}
+                    else {tokio::time::sleep(Duration::from_secs(1)).await;}
+                }
             }
         }
         if !success {
@@ -297,12 +299,15 @@ pub async fn dc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Resul
     state.dp_stopped.store(true, Ordering::Relaxed);
     // stop pipewire
     println!("Stopping Pipewire");
-    unsafe{for user in users::all_users() {
-        let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user.uid()), "stop", "pipewire.socket"])
+    let login_proxy = Proxy::new("org.freedesktop.login1", "/org/freedesktop/login1", Duration::from_secs(2), conn.clone());
+    let (users,) = login_proxy.method_call::<(Vec<(u32, String, dbus::Path)>,), _, _, _>("org.freedesktop.login1.Manager", "ListUsers", ()).await
+        .map_err(|err| LauncherError::FailedToGetUsers(err))?;
+    for (user, _, _) in users.iter(){
+        let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user), "stop", "pipewire.socket"])
             .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
-        let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user.uid()), "stop", "pipewire-pulse.socket"])
+        let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user), "stop", "pipewire-pulse.socket"])
             .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
-    }}
+    }
     state.pw_stopped.store(true, Ordering::Release);
     // wait for processes to close
     println!("Waiting for processes to close");
@@ -359,12 +364,12 @@ pub async fn dc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Resul
     state.vfio_loaded.store(true, Ordering::Relaxed);
     // restart pipewire
     println!("Starting Pipewire");
-    unsafe{for user in users::all_users() {
-        let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user.uid()), "start", "pipewire.socket"])
+    for (user, _, _) in users.iter(){
+        let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user), "start", "pipewire.socket"])
             .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
-        let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user.uid()), "start", "pipewire-pulse.socket"])
+        let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user), "start", "pipewire-pulse.socket"])
             .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
-    }}
+    }
     state.pw_stopped.store(false, Ordering::Relaxed);
     // restart display manager
     println!("Starting Display Manager");
@@ -564,11 +569,11 @@ pub async fn start_vm(state: Arc<SystemState>) -> Result<(), LauncherError>{
 
 /// wait for vm
 pub async fn wait_on_vm(state: Arc<SystemState>) -> Result<(), LauncherError>{
-    while !tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"])
-        .stderr(Stdio::null()).stdout(Stdio::null()).output()
-        .await.is_ok_and(|output| output.status.success()) {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
+    loop{
+        let state = tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"]).output().await
+            .map_err(|err| LauncherError::FailedToGetVmState(err))?;
+        if !state.status.success() {break;}
+    }
     state.vm_launched.store(false, Ordering::Relaxed);
     Ok(())
 }

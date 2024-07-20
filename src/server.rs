@@ -188,12 +188,13 @@ pub async fn define_server(conn: Arc<SyncConnection>) -> Result<Arc<Mutex<Server
         // Returns "" if the vm is not being launched
         b.method_with_cr_async("UserConnected", (), ("VmType",), 
         |mut ctx, cr, _: ()| {
-            println!("User Connected!");
+            println!("User Connected to DBus!");
             let object = cr.data_mut::<Arc<Mutex<ServerData>>>(&"/org/cws/WindowsLauncher".into()).cloned();
             async move {
                 let Some(data) = object else {return ctx.reply(Err(MethodErr::failed(&ServerError::FailedToFindServerData)));};
                 let vm_type = if let Ok(mut guard) = data.lock() {
                     if let VmState::Inactive = guard.vm_state.get() {return ctx.reply(Ok(("".to_string(),)));}
+                    println!("User Connected!");
                     guard.user_connected.set(true);
                     guard.vm_type.clone()
                 } else {return ctx.reply(Err(MethodErr::failed(&ServerError::CouldNotLockServerData)));};
