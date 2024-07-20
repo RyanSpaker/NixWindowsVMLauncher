@@ -556,11 +556,12 @@ pub async fn setup_pc(state: Arc<SystemState>, conn: Arc<SyncConnection>, mouse_
 
 /// Launch vm
 pub async fn start_vm(state: Arc<SystemState>) -> Result<(), LauncherError>{
-    let log_file = File::create(format!("/var/log/windows/vm/log-{}.txt", chrono::Local::now().to_string()))
+    let log_path = format!("/var/log/windows/vm/log-{}.txt", chrono::Local::now().to_string());
+    let log_file = File::create(&log_path)
         .map_err(|err| LauncherError::FailedtoCreateLogFile(err))?;
     let log = Stdio::from(log_file.try_clone().map_err(|err| LauncherError::FailedtoCreateLogFile(err))?);
     let log_err = Stdio::from(log_file);
-    let _ = tokio::process::Command::new("virsh").args(["-cqemu:///system", "create", "/tmp/windows.xml"])
+    let _ = tokio::process::Command::new("virsh").args(["-cqemu:///system", &format!("--log={}", log_path), "create", "/tmp/windows.xml"])
         .stdout(log).stderr(log_err).spawn()
         .map_err(|err| LauncherError::FailedToLaunchVM(err))?.wait().await;
     state.vm_launched.store(true, Ordering::Relaxed);
