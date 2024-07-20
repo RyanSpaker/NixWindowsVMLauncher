@@ -65,7 +65,8 @@ pub enum LauncherError{
     FailedToConnectGPU(String, std::io::Error),
     FailedToRestartDP(dbus::Error),
     FailedToGetUsers(dbus::Error),
-    FailedToGetVmState(std::io::Error)
+    FailedToGetVmState(std::io::Error),
+    FailedToStartTrackpad(dbus::Error)
 }
 impl Display for LauncherError{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -94,7 +95,8 @@ impl Display for LauncherError{
             Self::FailedToConnectGPU(pci, err) => format!("Failed to reconnect gpu: {}, with err: {}", *pci, *err),
             Self::FailedToRestartDP(err) => format!("Failed to restart display-manager.service: {}", *err),
             Self::FailedToGetUsers(err) => format!("Failed to get users from login1: {}", *err),
-            Self::FailedToGetVmState(err) => format!("failed to get vm state from virsh: {}", *err)
+            Self::FailedToGetVmState(err) => format!("failed to get vm state from virsh: {}", *err),
+            Self::FailedToStartTrackpad(err) => format!("Could not start trackpad-evdev-converter.service: {}", *err)
         });
         Ok(())
     }
@@ -256,9 +258,8 @@ pub async fn cleanup(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<
     if state.virtual_mouse_create.load(Ordering::Relaxed) {
         println!("Stopping Virtual Mouse");
         let proxy = Proxy::new("org.cws.VirtualMouse", "/org/cws/VirtualMouse", Duration::from_secs(2), conn.clone());
-        if let Err(err) = proxy.method_call::<(String, String, String), _, _, _>("org.cws.VirtualMouse.Manager", "DestroyMouse", ("WindowsMouse",)).await {
-            errors.push(LauncherError::FailedToStopVirtualMouse(err));
-        }
+        // ignore failures, since the mouse may have been destroyed for other reasons
+        let _ = proxy.method_call::<(String, String, String), _, _, _>("org.cws.VirtualMouse.Manager", "DestroyMouse", ("WindowsMouse",)).await;
     }
     println!("Undoing governor and cpu limiting");
     // undo performance governor
@@ -565,6 +566,10 @@ pub async fn setup_pc(state: Arc<SystemState>, conn: Arc<SyncConnection>, mouse_
     }
     state.performance_governor.store(true, Ordering::Relaxed);
     // create virtual mouse
+    let proxy = Proxy::new("org.freedesktop.systemd1", "/org/freedesktop/systemd1", Duration::from_secs(2), conn.clone());
+    let _: (dbus::Path,) = proxy.method_call("org.freedesktop.systemd1.Manager", "StartUnit", ("trackpad-evdev-converter.service", "replace")).await
+        .map_err(|err| LauncherError::FailedToStartTrackpad(err))?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let proxy = Proxy::new(
         "org.cws.VirtualMouse", 
         "/org/cws/VirtualMouse", 
