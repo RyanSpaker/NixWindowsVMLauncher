@@ -53,10 +53,11 @@ pub async fn app() -> Result<(), AppError> {
             return Err(AppError::ServerNotRunAsRoot);
         }
         let server_state = server::server().await.map_err(|err| AppError::ServerError(err))?;
-        let err = launcher::launcher(server_state.data.clone(), server_state.conn.clone()).await;
+        let result = launcher::launcher(server_state.data.clone(), server_state.conn.clone()).await;
+        let _ = server_state.conn.remove_match(server_state.signal_handle.token()).await;
         server_state.handle.abort();
         // killing is the only correct way to end the program, as it shouldnt end by itself
-        return Err(AppError::LauncherError(err));
+        return result.map_err(|err| AppError::LauncherError(err));
     }
 
     //session server

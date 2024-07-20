@@ -135,7 +135,7 @@ impl SystemState {
 }
 
 /// Asynchronous loop which handles all system setup. should never return
-pub async fn launcher(data: Arc<Mutex<ServerData>>, conn: Arc<SyncConnection>) -> LauncherError{
+pub async fn launcher(data: Arc<Mutex<ServerData>>, conn: Arc<SyncConnection>) -> Result<(), LauncherError>{
     let system_state = Arc::new(SystemState::default());
     let data_copy = data.clone();
     tokio::spawn(async move {
@@ -159,7 +159,14 @@ pub async fn launcher(data: Arc<Mutex<ServerData>>, conn: Arc<SyncConnection>) -
     loop{
         // wait for vm to be requested
         println!("Waiting for vm launch to be requested...");
-        if let Err(err) = (VmLaunchFuture{data: data.clone()}).await {return LauncherError::ServerError(err);};
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                return Ok(());
+            },
+            result = VmLaunchFuture{data: data.clone()} => {
+                result.map_err(|err| LauncherError::ServerError(err))
+            }
+        }?;
         // do work
         println!("Spawning VM Launch");
         let handle = tokio::spawn(launch_vm(data.clone(), system_state.clone(), conn.clone()));
@@ -169,20 +176,20 @@ pub async fn launcher(data: Arc<Mutex<ServerData>>, conn: Arc<SyncConnection>) -
                 println!("VM Launch Finished");
                 if let Ok(Err(err)) = result {  
                     let _ = cleanup(system_state, conn).await;
-                    return err;
+                    return Err(err);
                 }
                 if let Ok(mut guard) = data.lock() {guard.vm_state.set(VmState::ShuttingDown);}
             },
             result = VmShutdownFuture{data: data.clone()} => {
                 println!("Shutdown Interrupted Vm Launch");
-                if let Err(err) = result {return LauncherError::ServerError(err);}
+                result.map_err(|err| LauncherError::ServerError(err))?;
             }
         }
         // cleanup
         println!("Cleaning up...");
         let mut errors = cleanup(system_state.clone(), conn.clone()).await;
-        if errors.len() > 0 {return errors.remove(0);};
-        let mut guard = match data.lock() {Ok(guard) => guard, _ => {return LauncherError::FailedToLockData;}};
+        if errors.len() > 0 {return Err(errors.remove(0));};
+        let mut guard = match data.lock() {Ok(guard) => guard, _ => {return Err(LauncherError::FailedToLockData);}};
         guard.user_connected.set(false);
         guard.vm_state.set(VmState::Inactive);
     }
