@@ -4,7 +4,7 @@
 */
 
 use std::{error::Error, fmt::Display, sync::{Arc, Mutex}, task::Poll};
-use dbus::{channel::MatchingReceiver, message::MatchRule, nonblock::SyncConnection, MethodErr};
+use dbus::{arg::{self, PropMap}, channel::MatchingReceiver, message::MatchRule, nonblock::{MsgMatch, SyncConnection}, MethodErr};
 use dbus_crossroads::{Crossroads, IfaceBuilder};
 use dbus_tokio::connection::IOResourceError;
 use futures::Future;
@@ -18,7 +18,8 @@ pub enum ServerError{
     FailedToConnectToSystemBus(dbus::Error),
     FailedToGetName(dbus::Error),
     FailedToFindServerData,
-    CouldNotLockServerData
+    CouldNotLockServerData,
+    FailedToAddSignalHandler(dbus::Error)
 }
 impl Display for ServerError{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -26,7 +27,8 @@ impl Display for ServerError{
             Self::FailedToConnectToSystemBus(err) => format!("Could not connect to the system dbus: {}", *err),
             Self::FailedToGetName(err) => format!("Could not get the name org.cws.WindowsLauncher on the system dbus: {}", *err),
             Self::FailedToFindServerData => format!("Could not find ServerData"),
-            Self::CouldNotLockServerData => format!("Could not lock ServerData")
+            Self::CouldNotLockServerData => format!("Could not lock ServerData"),
+            Self::FailedToAddSignalHandler(err) => format!("Failed to add UPower property change signal handler: {}", *err)
         });
         Ok(())
     }
@@ -56,7 +58,9 @@ pub struct ServerData{
     /// whether or not a user has connected, and a waker to call when the variable changes
     pub user_connected: Hookable<bool>,
     /// path of the mouse to create for the vm
-    pub mouse_path: String
+    pub mouse_path: String,
+    /// whether or not the lid is closed
+    pub lid_is_closed: Hookable<bool>
 }
 
 /// Future which waits for the vm to be launched
@@ -119,7 +123,6 @@ impl Future for UserConnectedFuture{
     }
 }
 
-
 /// Future which waits for the vm to be shutdown
 pub struct VmShutdownFinishedFuture{
     pub data: Arc<Mutex<ServerData>>
@@ -160,22 +163,55 @@ impl Future for VmShutdownFuture{
     }
 }
 
+/// Future which waits for the vm to need to be paused or unpaused
+pub struct VmPauseFuture{
+    pub cur_pause_state: bool,
+    pub data: Arc<Mutex<ServerData>>
+}
+impl Future for VmPauseFuture{
+    type Output = Result<bool, ServerError>;
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        if let Ok(mut guard) = self.data.lock(){
+            match guard.vm_state.get() {
+                VmState::Launched => {
+                    match (guard.lid_is_closed.get(), self.cur_pause_state) {
+                        (true, true) | (false, false) => {
+                            guard.vm_state.hook(cx.waker().clone());
+                            guard.lid_is_closed.hook(cx.waker().clone());
+                            return Poll::Pending;
+                        },
+                        (true, false) => {return Poll::Ready(Ok(true));},
+                        (false, true) => {return Poll::Ready(Ok(false));}
+                    }
+                },
+                _ => {
+                    guard.vm_state.hook(cx.waker().clone());
+                    guard.lid_is_closed.hook(cx.waker().clone());
+                }
+            }
+        }else {return Poll::Ready(Err(ServerError::CouldNotLockServerData));}
+        self.cur_pause_state = false;
+        Poll::Pending
+    }
+}
+
 
 pub struct ServerStuff{
     pub data: Arc<Mutex<ServerData>>,
     pub handle: JoinHandle<IOResourceError>,
+    pub signal_handle: MsgMatch,
     pub conn: Arc<SyncConnection>
 }
 
 pub async fn server() -> Result<ServerStuff, ServerError>{
     let (r, conn) = dbus_tokio::connection::new_system_sync().map_err(|err| ServerError::FailedToConnectToSystemBus(err))?;
     let handle = tokio::spawn(r);
-    let data = define_server(conn.clone()).await?;
-    Ok(ServerStuff { data, handle, conn })
+    let (data, signal_handle) = define_server(conn.clone()).await?;
+    Ok(ServerStuff { data, handle, signal_handle, conn })
 }
 
 /// setup the dbus server
-pub async fn define_server(conn: Arc<SyncConnection>) -> Result<Arc<Mutex<ServerData>>, ServerError>{
+pub async fn define_server(conn: Arc<SyncConnection>) -> Result<(Arc<Mutex<ServerData>>, MsgMatch), ServerError>{
     // get name
     conn.request_name("org.cws.WindowsLauncher", false, false, true).await
         .map_err(|err| ServerError::FailedToGetName(err))?;
@@ -274,5 +310,22 @@ pub async fn define_server(conn: Arc<SyncConnection>) -> Result<Arc<Mutex<Server
         cr.handle_message(msg, conn).unwrap();
         true
     }));
-    Ok(server_data)
+    // create signal handler
+    let mr = MatchRule::new_signal("org.freedesktop.DBus.Properties", "PropertiesChanged");
+    let data = server_data.clone();
+    let signal_handle = conn.add_match(mr).await
+        .map_err(|err| ServerError::FailedToAddSignalHandler(err))?
+        .cb(move |_, (iname, change, _): (String, PropMap, Vec<String>)| {
+            if iname == "org.freedesktop.UPower"{
+                if let Some(value) = change.get("LidIsClosed") {
+                    if let Some(value) = arg::cast::<bool>(&value.0){
+                        if let Ok(mut guard) = data.lock(){
+                            guard.lid_is_closed.set(*value);
+                        }
+                    }
+                }
+            }
+            true
+        });
+    Ok((server_data, signal_handle))
 }

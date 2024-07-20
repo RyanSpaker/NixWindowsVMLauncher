@@ -5,7 +5,7 @@
 
 use std::{env::VarError, error::Error, fmt::Display, fs::File, io::{Read, Write}, path::Path, process::Stdio, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, time::Duration};
 use dbus::{arg::Variant, nonblock::{Proxy, SyncConnection}};
-use crate::server::{ServerData, ServerError, UserConnectedFuture, VmLaunchFuture, VmShutdownFuture};
+use crate::server::{ServerData, ServerError, UserConnectedFuture, VmLaunchFuture, VmPauseFuture, VmShutdownFuture};
 
 #[derive(Debug, Default, Clone)]
 pub enum VmState{
@@ -137,6 +137,25 @@ impl SystemState {
 /// Asynchronous loop which handles all system setup. should never return
 pub async fn launcher(data: Arc<Mutex<ServerData>>, conn: Arc<SyncConnection>) -> LauncherError{
     let system_state = Arc::new(SystemState::default());
+    let data_copy = data.clone();
+    tokio::spawn(async move {
+        let mut current_pause = false;
+        loop{
+            current_pause = match (VmPauseFuture{cur_pause_state: current_pause.clone(), data: data_copy.clone()}).await {
+                Err(err) => {return err;},
+                Ok(pause) => pause
+            };
+            if current_pause {
+                println!("Pausing VM");
+                let _ = tokio::process::Command::new("virsh").args(["-cqemu:///system", "suspend", "windows"])
+                    .stderr(Stdio::null()).stdout(Stdio::null()).output().await;
+            }else {
+                println!("Resuming VM");
+                let _ = tokio::process::Command::new("virsh").args(["-cqemu:///system", "resume", "windows"])
+                    .stderr(Stdio::null()).stdout(Stdio::null()).output().await;
+            }
+        }
+    });
     loop{
         // wait for vm to be requested
         println!("Waiting for vm launch to be requested...");
@@ -200,6 +219,9 @@ pub async fn cleanup(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<
     let mut errors: Vec<LauncherError> = vec![];
     // make sure vm is shutdown
     if state.vm_launched.load(Ordering::Relaxed) {
+        // resume just in case
+        let _ = tokio::process::Command::new("virsh").args(["-cqemu:///system", "resume", "windows"])
+            .stderr(Stdio::null()).stdout(Stdio::null()).output().await;
         println!("Shutting Down VM");
         if let Err(err) = tokio::process::Command::new("virsh").args(["-cqemu:///windows", "shutdown", "windows"]).status().await {
             errors.push(LauncherError::FailedToShutdownVm(err));
