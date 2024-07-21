@@ -603,10 +603,14 @@ pub async fn start_vm(state: Arc<SystemState>) -> Result<(), LauncherError>{
 
 /// wait for vm
 pub async fn wait_on_vm(state: Arc<SystemState>) -> Result<(), LauncherError>{
-    loop{
-        let state = tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"]).output().await
-            .map_err(|err| LauncherError::FailedToGetVmState(err))?;
-        if !state.status.success() {break;}
+    if tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"]).output().await
+        .map_err(|err| LauncherError::FailedToGetVmState(err))?.status.success() 
+    {
+        let _ = tokio::process::Command::new("virsh")
+            .args(["-cqemu:///system", "event", "--event", "lifecycle", "--domain", "windows"])
+            .stderr(Stdio::null()).stdout(Stdio::null())
+            .status().await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
     state.vm_launched.store(false, Ordering::Relaxed);
     Ok(())
