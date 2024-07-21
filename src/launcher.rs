@@ -65,7 +65,8 @@ pub enum LauncherError{
     FailedToConnectGPU(String, std::io::Error),
     FailedToRestartDP(dbus::Error),
     FailedToGetUsers(dbus::Error),
-    FailedToGetVmState(std::io::Error)
+    FailedToGetVmState(std::io::Error),
+    FailedToGetEvents(std::io::Error)
 }
 impl Display for LauncherError{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -94,7 +95,8 @@ impl Display for LauncherError{
             Self::FailedToConnectGPU(pci, err) => format!("Failed to reconnect gpu: {}, with err: {}", *pci, *err),
             Self::FailedToRestartDP(err) => format!("Failed to restart display-manager.service: {}", *err),
             Self::FailedToGetUsers(err) => format!("Failed to get users from login1: {}", *err),
-            Self::FailedToGetVmState(err) => format!("failed to get vm state from virsh: {}", *err)
+            Self::FailedToGetVmState(err) => format!("failed to get vm state from virsh: {}", *err),
+            Self::FailedToGetEvents(err) => format!("Failed to get events from virsh: {}", *err)
         });
         Ok(())
     }
@@ -223,19 +225,55 @@ pub async fn cleanup(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<
         let _ = tokio::process::Command::new("virsh").args(["-cqemu:///system", "resume", "windows"])
             .stderr(Stdio::null()).stdout(Stdio::null()).output().await;
         println!("Shutting Down VM");
-        if let Err(err) = tokio::process::Command::new("virsh").args(["-cqemu:///windows", "shutdown", "windows"]).status().await {
+        if let Err(err) = tokio::process::Command::new("virsh").args(["-cqemu:///system", "shutdown", "windows"]).status().await {
             errors.push(LauncherError::FailedToShutdownVm(err));
         };
         let mut success = false;
         println!("Waiting for vm to shutdown");
-        for _ in 0..30 {
-            match tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"]).output().await {
-                Err(err) => {errors.push(LauncherError::FailedToGetVmState(err)); break;}
-                Ok(output) => {
-                    if !output.status.success() {success = true; break;}
-                    else {tokio::time::sleep(Duration::from_secs(1)).await;}
+        match tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"]).output().await {
+            Ok(output) => {if !output.status.success() {success = true;} else {
+                let mut inner_success = false;
+                loop{
+                    let output = tokio::process::Command::new("virsh")
+                        .args(["-cqemu:///system", "event", "--event", "lifecycle", "--domain", "windows"])
+                        .stderr(Stdio::null()).stdout(Stdio::null())
+                        .output();
+                    let result = tokio::select! {
+                        result = output => {result},
+                        _ = tokio::time::sleep(Duration::from_secs(30)) => {break;}
+                    };
+                    match result {
+                        Err(err) => {errors.push(LauncherError::FailedToGetEvents(err)); break;},
+                        Ok(output) => {
+                            if String::from_utf8_lossy(&output.stdout).contains("Shutdown Finished after guest request") {inner_success = true; break;}
+                        }
+                    }
                 }
-            }
+                if inner_success {loop{
+                    let child = match tokio::process::Command::new("virsh")
+                        .args(["-cqemu:///system", "event", "--event", "lifecycle", "--domain", "windows"])
+                        .stderr(Stdio::null()).stdout(Stdio::null()).spawn() 
+                    {
+                        Err(err) => {errors.push(LauncherError::FailedToGetEvents(err)); break;},
+                        Ok(result) => result
+                    };
+                    match tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"]).output().await {
+                        Err(err) => {errors.push(LauncherError::FailedToGetVmState(err)); break;},
+                        Ok(output) => {if !output.status.success() {success = true; break;}}
+                    }
+                    let result = tokio::select! {
+                        result = child.wait_with_output() => {result},
+                        _ = tokio::time::sleep(Duration::from_secs(30)) => {break;}
+                    };
+                    match result {
+                        Err(err) => {errors.push(LauncherError::FailedToGetEvents(err)); break;},
+                        Ok(output) => {
+                            if String::from_utf8_lossy(&output.stdout).contains("Stopped Shutdown") {success = true; break;}
+                        }
+                    }
+                }}
+            }},
+            Err(err) => {errors.push(LauncherError::FailedToShutdownVm(err));}
         }
         if !success {
             println!("Destroying VM");
@@ -606,11 +644,24 @@ pub async fn wait_on_vm(state: Arc<SystemState>) -> Result<(), LauncherError>{
     if tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"]).output().await
         .map_err(|err| LauncherError::FailedToGetVmState(err))?.status.success() 
     {
-        let _ = tokio::process::Command::new("virsh")
+        loop{
+            if String::from_utf8_lossy(&tokio::process::Command::new("virsh")
             .args(["-cqemu:///system", "event", "--event", "lifecycle", "--domain", "windows"])
             .stderr(Stdio::null()).stdout(Stdio::null())
-            .status().await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
+            .output().await.map_err(|err| LauncherError::FailedToGetEvents(err))?.stdout).contains("Shutdown Finished after guest request") {
+                break;
+            }
+        }
+        loop{
+            let child = tokio::process::Command::new("virsh")
+                .args(["-cqemu:///system", "event", "--event", "lifecycle", "--domain", "windows"])
+                .stderr(Stdio::null()).stdout(Stdio::null()).spawn().map_err(|err| LauncherError::FailedToGetEvents(err))?;
+            if !tokio::process::Command::new("virsh").args(["-cqemu:///system", "domstate", "windows"]).output().await
+                .map_err(|err| LauncherError::FailedToGetVmState(err))?.status.success() {break;}
+            if String::from_utf8_lossy(&child.wait_with_output().await.map_err(|err| LauncherError::FailedToGetEvents(err))?.stdout).contains("Stopped Shutdown") {
+                break;
+            }
+        }
     }
     state.vm_launched.store(false, Ordering::Relaxed);
     Ok(())

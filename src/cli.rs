@@ -94,7 +94,7 @@ pub async fn query() -> Result<(), CliError> {
 // shutdown the vm
 pub async fn shutdown() -> Result<(), CliError> {
     let (conn, h) = get_system_conn()?;
-    let proxy = Proxy::new("org.cws.WindowsLauncher", "/org/cws/WindowsLauncher", Duration::from_secs(2), conn.clone());
+    let proxy = Proxy::new("org.cws.WindowsLauncher", "/org/cws/WindowsLauncher", Duration::from_secs(30), conn.clone());
     let _: () = proxy.method_call("org.cws.WindowsLauncher.Manager", "Shutdown", ()).await
         .map_err(|err| CliError::FailedToCallShutdown(err))?;
     h.abort();
