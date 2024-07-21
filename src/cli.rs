@@ -25,8 +25,7 @@ pub enum CliError{
     FailedToCallShutdown(dbus::Error),
     FailedToLaunchLG(dbus::Error),
     FailedToLaunchSpice(dbus::Error),
-    FailedToConnectToSessionBus(dbus::Error),
-    FailedToStartServer(dbus::Error)
+    FailedToConnectToSessionBus(dbus::Error)
 }
 impl Display for CliError{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,8 +36,7 @@ impl Display for CliError{
             Self::FailedToQueryState(err) => format!("Failed to query the system server for the vm state: {}", *err),
             Self::FailedToCallShutdown(err) => format!("Failed to call shutdown on the system server: {}", *err),
             Self::FailedToLaunchLG(err) => format!("Failed to call LaunchLG on the system server: {}", *err),
-            Self::FailedToLaunchSpice(err) => format!("Failed to call LaunchSpice on the system server: {}", *err),
-            Self::FailedToStartServer(err) => format!("Failed to start windows-launcher.service: {}", *err)
+            Self::FailedToLaunchSpice(err) => format!("Failed to call LaunchSpice on the system server: {}", *err)
         });
         Ok(())
     }
@@ -59,7 +57,6 @@ pub async fn cli(command: Command) -> Result<(), CliError> {
 // start the looking glass windows vm
 pub async fn start_lg(path: String) -> Result<(), CliError> {
     let (conn, h) = get_system_conn()?;
-    start_server(conn.clone()).await?;
     let proxy = Proxy::new("org.cws.WindowsLauncher", "/org/cws/WindowsLauncher", Duration::from_secs(2), conn.clone());
     let _: () = proxy.method_call("org.cws.WindowsLauncher.Manager", "LaunchLG", (path,)).await.map_err(|err| CliError::FailedToLaunchLG(err))?;
     h.abort();
@@ -68,7 +65,6 @@ pub async fn start_lg(path: String) -> Result<(), CliError> {
 // start the spice windows vm
 pub async fn start_spice(path: String) -> Result<(), CliError> {
     let (conn, h) = get_system_conn()?;
-    start_server(conn.clone()).await?;
     let proxy = Proxy::new("org.cws.WindowsLauncher", "/org/cws/WindowsLauncher", Duration::from_secs(2), conn.clone());
     let _: () = proxy.method_call("org.cws.WindowsLauncher.Manager", "LaunchSpice", (path,)).await.map_err(|err| CliError::FailedToLaunchSpice(err))?;
     h.abort();
@@ -87,7 +83,6 @@ pub async fn open() -> Result<(), CliError> {
 // query the state of the vm
 pub async fn query() -> Result<(), CliError> {
     let (conn, h) = get_system_conn()?;
-    start_server(conn.clone()).await?;
     let proxy = Proxy::new("org.cws.WindowsLauncher", "/org/cws/WindowsLauncher", Duration::from_secs(2), conn.clone());
     let (state, t): (String, String) = proxy.method_call("org.cws.WindowsLauncher.Manager", "Query", ()).await
         .map_err(|err| CliError::FailedToQueryState(err))?;
@@ -99,7 +94,6 @@ pub async fn query() -> Result<(), CliError> {
 // shutdown the vm
 pub async fn shutdown() -> Result<(), CliError> {
     let (conn, h) = get_system_conn()?;
-    start_server(conn.clone()).await?;
     let proxy = Proxy::new("org.cws.WindowsLauncher", "/org/cws/WindowsLauncher", Duration::from_secs(2), conn.clone());
     let _: () = proxy.method_call("org.cws.WindowsLauncher.Manager", "Shutdown", ()).await
         .map_err(|err| CliError::FailedToCallShutdown(err))?;
@@ -131,12 +125,5 @@ pub fn get_session_conn() -> Result<(Arc<SyncConnection>, JoinHandle<IOResourceE
     let (r, conn) = dbus_tokio::connection::new_session_sync().map_err(|err| CliError::FailedToConnectToSessionBus(err))?;
     let handle = tokio::spawn(r);
     return Ok((conn, handle));
-}
-
-pub async fn start_server(conn: Arc<SyncConnection>) -> Result<(), CliError> {
-    let proxy = Proxy::new("org.freedesktop.systemd1", "/org/freedesktop/systemd1", Duration::from_secs(2), conn.clone());
-    let _: (dbus::Path,) = proxy.method_call("org.freedesktop.systemd1.Manager", "StartUnit", ("windows-launcher.service", "replace")).await
-        .map_err(|err| CliError::FailedToStartServer(err))?;
-    Ok(())
 }
 
