@@ -55,10 +55,6 @@ pub async fn session()->Result<(), SessionError> {
                 println!("Got empty launch type, vm is not running");
                 return Ok(());
             }
-            if launch_type == "Direct"{
-                println!("Got direct launch type, no viewer necessary");
-                return Ok(());
-            }
             launch_type
         }
     };

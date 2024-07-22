@@ -283,25 +283,6 @@ pub async fn define_server(conn: Arc<SyncConnection>) -> Result<(Arc<Mutex<Serve
                 }
             }else{Err(MethodErr::failed("Could not lock ServerData"))}
         });
-        // tells the server to launch direct, returns immediately
-        b.method("LaunchDirect", ("MousePath",), (), 
-        |_, data, (path,): (String,)| {
-            println!("Direct Launch Requested!");
-            if let Ok(mut guard) = data.lock() {
-                match guard.vm_state.get() {
-                    VmState::Inactive => {
-                        guard.vm_type = VmType::Direct;
-                        guard.vm_state.set(VmState::Activating);
-                        guard.user_connected.set(false);
-                        guard.mouse_path = path;
-                        Ok(())
-                    }, 
-                    _ => {
-                        Err(MethodErr::failed("Vm Already Launched"))
-                    }
-                }
-            }else{Err(MethodErr::failed("Could not lock ServerData"))}
-        });
         // tells the server to launch spice. returns immediately
         b.method("LaunchSpice", ("MousePath",), (), 
         |_, data, (path,): (String,)| {

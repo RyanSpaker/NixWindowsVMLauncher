@@ -69,10 +69,6 @@ pub async fn app() -> Result<(), AppError> {
             if !arguments.len() == 2 {Command::Help}
             else {Command::Start(launcher::VmType::LookingGlass, arguments[1].to_string())}
         }
-        "--direct" => {
-            if !arguments.len() == 2 {Command::Help}
-            else {Command::Start(launcher::VmType::Direct, arguments[1].to_string())}
-        }
         "--open" => {Command::Open},
         "--query" => {Command::Query},
         "--shutdown" => {Command::Shutdown},

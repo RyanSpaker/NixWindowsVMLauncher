@@ -25,8 +25,7 @@ pub enum CliError{
     FailedToCallShutdown(dbus::Error),
     FailedToLaunchLG(dbus::Error),
     FailedToLaunchSpice(dbus::Error),
-    FailedToConnectToSessionBus(dbus::Error),
-    FailedToLaunchDirect(dbus::Error)
+    FailedToConnectToSessionBus(dbus::Error)
 }
 impl Display for CliError{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,8 +36,7 @@ impl Display for CliError{
             Self::FailedToQueryState(err) => format!("Failed to query the system server for the vm state: {}", *err),
             Self::FailedToCallShutdown(err) => format!("Failed to call shutdown on the system server: {}", *err),
             Self::FailedToLaunchLG(err) => format!("Failed to call LaunchLG on the system server: {}", *err),
-            Self::FailedToLaunchSpice(err) => format!("Failed to call LaunchSpice on the system server: {}", *err),
-            Self::FailedToLaunchDirect(err) => format!("Could not launch direct render windows vm: {}", *err)
+            Self::FailedToLaunchSpice(err) => format!("Failed to call LaunchSpice on the system server: {}", *err)
         });
         Ok(())
     }
@@ -50,7 +48,6 @@ pub async fn cli(command: Command) -> Result<(), CliError> {
     match command{
         Command::Start(VmType::LookingGlass, path) => start_lg(path).await,
         Command::Start(VmType::Spice, path) => start_spice(path).await,
-        Command::Start(VmType::Direct, path) => start_direct(path).await,
         Command::Open => open().await,
         Command::Query => query().await,
         Command::Shutdown => shutdown().await,
@@ -74,15 +71,6 @@ pub async fn start_spice(path: String) -> Result<(), CliError> {
     open().await?;
     Ok(())
 }
-// start the direct windows vm
-pub async fn start_direct(path: String) -> Result<(), CliError> {
-    let (conn, h) = get_system_conn()?;
-    let proxy = Proxy::new("org.cws.WindowsLauncher", "/org/cws/WindowsLauncher", Duration::from_secs(2), conn.clone());
-    let _: () = proxy.method_call("org.cws.WindowsLauncher.Manager", "LaunchDirect", (path,)).await.map_err(|err| CliError::FailedToLaunchDirect(err))?;
-    h.abort();
-    Ok(())
-}
-
 // start the user session
 pub async fn open() -> Result<(), CliError> {
     let (conn, h) = get_session_conn()?;
@@ -118,9 +106,8 @@ pub async fn help() -> Result<(), CliError> {
     println!("Usage:");
     println!("--server: starts the system server, used as a start command for a systemd service");
     println!("--session: start the session server, used as a start command foir a systemd user service");
-    println!("--spice: starts the spice vm by starting the spice system service, and then the user service. requires mouse evdev path as second arg");
-    println!("--lg: start the looking glass vm by starting the looking glass systemd service. requires mouse evdev path as second arg");
-    println!("--direct: start the vm by starting the direct systemd service. requires mouse evdev path as second arg");
+    println!("--spice: starts the spice vm, and then the user service. requires mouse evdev path as second arg");
+    println!("--lg: start the looking glass vm. requires mouse evdev path as second arg");
     println!("--open: starts the user session service to open the correct vm viewer");
     println!("--query: returns the state of the vm");
     println!("--shutdown: stops the vm");
