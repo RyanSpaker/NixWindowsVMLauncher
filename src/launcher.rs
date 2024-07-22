@@ -120,7 +120,7 @@ pub struct SystemState{
     gpu_dettached: (AtomicBool, AtomicBool),
     vfio_loaded: AtomicBool,
     vtconsole_unbound: (AtomicBool, AtomicBool),
-    intel_unloaded: (AtomicBool, AtomicBool)
+    intel_unloaded: AtomicBool
 }
 impl SystemState {
     pub fn revert(&self) {
@@ -536,13 +536,7 @@ pub async fn dc_gpu_direct(state: Arc<SystemState>, conn: Arc<SyncConnection>) -
     if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
         return Err(LauncherError::ModprobeRemoveReturnedErr("xe".to_string(), String::from_utf8(out.stderr.clone()).unwrap()));
     }
-    state.intel_unloaded.0.store(true, Ordering::Relaxed);
-    let out = tokio::process::Command::new("modprobe").args(["-f", "-r", "i915"]).output().await
-        .map_err(|err| LauncherError::FailedToUnloadKernelModule("i915".to_string(), err))?;
-    if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
-        return Err(LauncherError::ModprobeRemoveReturnedErr("i915".to_string(), String::from_utf8(out.stderr.clone()).unwrap()));
-    }
-    state.intel_unloaded.1.store(true, Ordering::Relaxed);
+    state.intel_unloaded.store(true, Ordering::Relaxed);
     // restart pipewire
     println!("Starting Pipewire");
     for (user, _, _) in users.iter(){
