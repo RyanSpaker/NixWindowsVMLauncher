@@ -10,12 +10,6 @@ use nix::unistd::Uid;
 use server::ServerError;
 use session::SessionError;
 
-#[derive(Default, Debug, Clone)]
-pub enum LaunchConfig{
-    #[default] LG,
-    Spice
-}
-
 /// Enum representing app errors
 #[derive(Debug)]
 pub enum AppError{
@@ -69,11 +63,15 @@ pub async fn app() -> Result<(), AppError> {
     let command = match arguments[0].as_str() {
         "--spice" => {
             if !arguments.len() == 2 {Command::Help}
-            else {Command::Start(LaunchConfig::Spice, arguments[1].to_string())}
+            else {Command::Start(launcher::VmType::Spice, arguments[1].to_string())}
         },
         "--lg" => {
             if !arguments.len() == 2 {Command::Help}
-            else {Command::Start(LaunchConfig::LG, arguments[1].to_string())}
+            else {Command::Start(launcher::VmType::LookingGlass, arguments[1].to_string())}
+        }
+        "--direct" => {
+            if !arguments.len() == 2 {Command::Help}
+            else {Command::Start(launcher::VmType::Direct, arguments[1].to_string())}
         }
         "--open" => {Command::Open},
         "--query" => {Command::Query},

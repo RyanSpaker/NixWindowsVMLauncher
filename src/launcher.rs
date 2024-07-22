@@ -27,13 +27,15 @@ impl ToString for VmState{
 #[derive(Debug, Default, Clone)]
 pub enum VmType{
     #[default] LookingGlass,
-    Spice
+    Spice,
+    Direct
 }
 impl ToString for VmType{
     fn to_string(&self) -> String {
         match self {
             Self::LookingGlass => "Looking Glass",
-            Self::Spice => "Spice"
+            Self::Spice => "Spice",
+            Self::Direct => "Direct"
         }.to_string()
     }
 }
@@ -66,7 +68,8 @@ pub enum LauncherError{
     FailedToRestartDP(dbus::Error),
     FailedToGetUsers(dbus::Error),
     FailedToGetVmState(std::io::Error),
-    FailedToGetEvents(std::io::Error)
+    FailedToGetEvents(std::io::Error),
+    FailedToDisableVtConsole(std::io::Error)
 }
 impl Display for LauncherError{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -96,7 +99,8 @@ impl Display for LauncherError{
             Self::FailedToRestartDP(err) => format!("Failed to restart display-manager.service: {}", *err),
             Self::FailedToGetUsers(err) => format!("Failed to get users from login1: {}", *err),
             Self::FailedToGetVmState(err) => format!("failed to get vm state from virsh: {}", *err),
-            Self::FailedToGetEvents(err) => format!("Failed to get events from virsh: {}", *err)
+            Self::FailedToGetEvents(err) => format!("Failed to get events from virsh: {}", *err),
+            Self::FailedToDisableVtConsole(err) => format!("Failed to send 0 to vtconsole bind file: {}", *err)
         });
         Ok(())
     }
@@ -114,7 +118,9 @@ pub struct SystemState{
     pw_stopped: AtomicBool,
     nvidia_unloaded: (AtomicBool, AtomicBool, AtomicBool, AtomicBool),
     gpu_dettached: (AtomicBool, AtomicBool),
-    vfio_loaded: AtomicBool
+    vfio_loaded: AtomicBool,
+    vtconsole_unbound: (AtomicBool, AtomicBool),
+    intel_unloaded: (AtomicBool, AtomicBool)
 }
 impl SystemState {
     pub fn revert(&self) {
@@ -193,14 +199,22 @@ pub async fn launcher(data: Arc<Mutex<ServerData>>, conn: Arc<SyncConnection>) -
 /// asynchronous function, responsible for doing essentially all of the vm launching
 pub async fn launch_vm(data: Arc<Mutex<ServerData>>, state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Result<(), LauncherError>{
     let vm_type = data.lock().map_err(|_| LauncherError::FailedToLockData)?.vm_type.clone();
-    // if type is lg, we need to dc the gpu
-    if let VmType::LookingGlass = vm_type {
-        println!("Disconnecting GPU");
-        dc_gpu(state.clone(), conn.clone()).await?;
+    match vm_type {
+        VmType::LookingGlass => {
+            println!("Disconnecting GPU");
+            dc_gpu_lg(state.clone(), conn.clone()).await?;
+            println!("Waiting for user connection");
+            UserConnectedFuture{data: data.clone()}.await.map_err(|err| LauncherError::ServerError(err))?;
+        },
+        VmType::Spice => {
+            println!("Waiting for user connection");
+            UserConnectedFuture{data: data.clone()}.await.map_err(|err| LauncherError::ServerError(err))?;
+        },
+        VmType::Direct => {
+            println!("Disconnecting GPU and intel graphics");
+            dc_gpu_direct(state.clone(), conn.clone()).await?;
+        }
     }
-    // we need to wait for a user session to connect before continuing
-    println!("Waiting for user connection");
-    UserConnectedFuture{data: data.clone()}.await.map_err(|err| LauncherError::ServerError(err))?;
     // setup the pc
     println!("Setting up PC...");
     let mouse_path = data.lock().map_err(|_|LauncherError::FailedToLockData)?.mouse_path.clone();
@@ -349,7 +363,7 @@ pub async fn cleanup(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Vec<
 }
 
 /// Disconnects the gpu from the system
-pub async fn dc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Result<(), LauncherError>{
+pub async fn dc_gpu_lg(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Result<(), LauncherError>{
     // stop display manager
     println!("Stopping Display Manager");
     let proxy = Proxy::new("org.freedesktop.systemd1", "/org/freedesktop/systemd1", Duration::from_secs(2), conn.clone());
@@ -430,11 +444,114 @@ pub async fn dc_gpu(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Resul
             .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
     }
     state.pw_stopped.store(false, Ordering::Relaxed);
-    // restart display manager
-    println!("Starting Display Manager");
-    let _: (dbus::Path,) = proxy.method_call("org.freedesktop.systemd1.Manager", "StartUnit", ("display-manager.service", "replace")).await
-        .map_err(|err| LauncherError::FailedToStartDP(err))?;
-    state.dp_stopped.store(false, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Disconnects the gpu from the system, also disconnects integrated graphics to get rid of framebuffer
+pub async fn dc_gpu_direct(state: Arc<SystemState>, conn: Arc<SyncConnection>) -> Result<(), LauncherError>{
+    // stop display manager
+    println!("Stopping Display Manager");
+    let proxy = Proxy::new("org.freedesktop.systemd1", "/org/freedesktop/systemd1", Duration::from_secs(2), conn.clone());
+    let _: (dbus::Path,) = proxy.method_call("org.freedesktop.systemd1.Manager", "StopUnit", ("display-manager.service", "replace")).await
+        .map_err(|err| LauncherError::FailedToStopDP(err))?;
+    state.dp_stopped.store(true, Ordering::Relaxed);
+    // stop pipewire
+    println!("Stopping Pipewire");
+    let login_proxy = Proxy::new("org.freedesktop.login1", "/org/freedesktop/login1", Duration::from_secs(2), conn.clone());
+    let (users,) = login_proxy.method_call::<(Vec<(u32, String, dbus::Path)>,), _, _, _>("org.freedesktop.login1.Manager", "ListUsers", ()).await
+        .map_err(|err| LauncherError::FailedToGetUsers(err))?;
+    for (user, _, _) in users.iter(){
+        let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user), "stop", "pipewire.socket"])
+            .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
+        let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user), "stop", "pipewire-pulse.socket"])
+            .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
+    }
+    state.pw_stopped.store(true, Ordering::Release);
+    // wait for processes to close
+    println!("Waiting for processes to close");
+    let mut success = false;
+    for _ in 0..20{
+        let output = tokio::process::Command::new("ps").args(["-u", "root"]).stderr(Stdio::null()).stdout(Stdio::piped()).output().await
+            .map_err(|err| LauncherError::FailedToGetProcesses(err))?.stdout;
+        let output = String::from_utf8_lossy(&output);
+        if output.contains("sddm") || output.contains("X") {
+            tokio::time::sleep(Duration::from_secs_f32(0.1)).await;
+            continue;
+        };
+        success = true; break;
+    }
+    if !success {return Err(LauncherError::ProcessesDidNotExit);}
+    // unload nvidia
+    println!("Unloading Nvidia Modules");
+    let out = tokio::process::Command::new("modprobe").args(["-f", "-r", "nvidia_uvm"]).output().await
+        .map_err(|err| LauncherError::FailedToUnloadKernelModule("nvidia_uvm".to_string(), err))?;
+    if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+        return Err(LauncherError::ModprobeRemoveReturnedErr("nvidia_uvm".to_string(), String::from_utf8(out.stderr.clone()).unwrap()));
+    }
+    state.nvidia_unloaded.0.store(true, Ordering::Relaxed);
+    let out = tokio::process::Command::new("modprobe").args(["-f", "-r", "nvidia_drm"]).output().await
+        .map_err(|err| LauncherError::FailedToUnloadKernelModule("nvidia_drm".to_string(), err))?;
+    if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+        return Err(LauncherError::ModprobeRemoveReturnedErr("nvidia_drm".to_string(), String::from_utf8(out.stderr.clone()).unwrap()));
+    }
+    state.nvidia_unloaded.1.store(true, Ordering::Relaxed);
+    let out = tokio::process::Command::new("modprobe").args(["-f", "-r", "nvidia_modeset"]).output().await
+        .map_err(|err| LauncherError::FailedToUnloadKernelModule("nvidia_modeset".to_string(), err))?;
+    if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+        return Err(LauncherError::ModprobeRemoveReturnedErr("nvidia_modeset".to_string(), String::from_utf8(out.stderr.clone()).unwrap()));
+    }
+    state.nvidia_unloaded.2.store(true, Ordering::Relaxed);
+    let out = tokio::process::Command::new("modprobe").args(["-f", "-r", "nvidia"]).output().await
+        .map_err(|err| LauncherError::FailedToUnloadKernelModule("nvidia".to_string(), err))?;
+    if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+        return Err(LauncherError::ModprobeRemoveReturnedErr("nvidia".to_string(), String::from_utf8(out.stderr.clone()).unwrap()));
+    }
+    state.nvidia_unloaded.3.store(true, Ordering::Relaxed);
+    // disconnect
+    println!("Disconnecting GPU");
+    let _ = tokio::process::Command::new("virsh").args(["nodedev-detach", "pci_0000_01_00_0"]).status().await
+        .map_err(|err| LauncherError::FailedToDisconnectGPU("pci_0000_01_00_0".to_string(), err))?;
+    state.gpu_dettached.0.store(true, Ordering::Relaxed);
+    let _ = tokio::process::Command::new("virsh").args(["nodedev-detach", "pci_0000_01_00_1"]).status().await
+        .map_err(|err| LauncherError::FailedToDisconnectGPU("pci_0000_01_00_1".to_string(), err))?;
+    state.gpu_dettached.1.store(true, Ordering::Relaxed);
+    // load vfio
+    println!("Loading VFIO");
+    let _ = tokio::process::Command::new("modprobe").args(["vfio-pci"]).status().await
+        .map_err(|err| LauncherError::FailedToLoadKernelModule("vfio-pci".to_string(), err))?;
+    state.vfio_loaded.store(true, Ordering::Relaxed);
+    // unbind vt consoles
+    println!("Unbinding VT Consoles");
+    File::create("/sys/class/vtconsole/vtcon0/bind")
+        .map_err(|err| LauncherError::FailedToDisableVtConsole(err))?
+        .write("0".as_bytes()).map_err(|err| LauncherError::FailedToDisableVtConsole(err))?;
+    state.vtconsole_unbound.0.store(true, Ordering::Relaxed);
+    File::create("/sys/class/vtconsole/vtcon1/bind")
+        .map_err(|err| LauncherError::FailedToDisableVtConsole(err))?
+        .write("0".as_bytes()).map_err(|err| LauncherError::FailedToDisableVtConsole(err))?;
+    state.vtconsole_unbound.1.store(true, Ordering::Relaxed);
+    // unload xe and i915 modules ad drm modules
+    let out = tokio::process::Command::new("modprobe").args(["-f", "-r", "xe"]).output().await
+        .map_err(|err| LauncherError::FailedToUnloadKernelModule("xe".to_string(), err))?;
+    if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+        return Err(LauncherError::ModprobeRemoveReturnedErr("xe".to_string(), String::from_utf8(out.stderr.clone()).unwrap()));
+    }
+    state.intel_unloaded.0.store(true, Ordering::Relaxed);
+    let out = tokio::process::Command::new("modprobe").args(["-f", "-r", "i915"]).output().await
+        .map_err(|err| LauncherError::FailedToUnloadKernelModule("i915".to_string(), err))?;
+    if out.stderr.len() > 0 && !String::from_utf8(out.stderr.clone()).unwrap().contains("not found") {
+        return Err(LauncherError::ModprobeRemoveReturnedErr("i915".to_string(), String::from_utf8(out.stderr.clone()).unwrap()));
+    }
+    state.intel_unloaded.1.store(true, Ordering::Relaxed);
+    // restart pipewire
+    println!("Starting Pipewire");
+    for (user, _, _) in users.iter(){
+        let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user), "start", "pipewire.socket"])
+            .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
+        let _ = tokio::process::Command::new("systemctl").args(["--user", &format!("--machine={}@", user), "start", "pipewire-pulse.socket"])
+            .stderr(Stdio::null()).stdout(Stdio::null()).status().await;
+    }
+    state.pw_stopped.store(false, Ordering::Relaxed);
     Ok(())
 }
 
@@ -608,7 +725,8 @@ pub async fn setup_pc(state: Arc<SystemState>, conn: Arc<SyncConnection>, mouse_
     // create xml
     let xml_source_path = match vm_type {
         VmType::LookingGlass => {std::env::var("WINDOWS_LG_XML")},
-        VmType::Spice => {std::env::var("WINDOWS_SPICE_XML")}
+        VmType::Spice => {std::env::var("WINDOWS_SPICE_XML")},
+        VmType::Direct => {std::env::var("WINDOWS_DIRECT_XML")}
     }.map_err(|err| LauncherError::FailedToGetXmlPath(err))?;
     let mut xml_string = String::with_capacity(10000);
     match File::open(xml_source_path.clone()).map(|mut file| file.read_to_string(&mut xml_string)) {
