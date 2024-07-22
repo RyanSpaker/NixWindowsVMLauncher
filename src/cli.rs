@@ -50,7 +50,7 @@ pub async fn cli(command: Command) -> Result<(), CliError> {
     match command{
         Command::Start(VmType::LookingGlass, path) => start_lg(path).await,
         Command::Start(VmType::Spice, path) => start_spice(path).await,
-        Command::Start(VmType::Direct, path) => start_spice(path).await,
+        Command::Start(VmType::Direct, path) => start_direct(path).await,
         Command::Open => open().await,
         Command::Query => query().await,
         Command::Shutdown => shutdown().await,
